@@ -6,5 +6,5 @@ ConditionPathIsMountPoint=/mnt/microcloud-backups
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/microcloud-maintenance
-ExecStart=/opt/microcloud-maintenance/backup-instances.sh
+WorkingDirectory=/opt/microcloud-maintenance/backup
+ExecStart=/opt/microcloud-maintenance/backup/backup-instances.sh

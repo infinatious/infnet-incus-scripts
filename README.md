@@ -80,9 +80,12 @@ These scripts are intended for a project-based workflow on a MicroCloud host.
 - `resize-instance.sh` resizes an existing instance in the selected project.
 - `delete-instance.sh` removes a single instance.
 - `delete-project.sh` deletes all profiles in a project, removes the network, and destroys the project.
-- `backup-instances.sh` exports every instance running on the local cluster member to NFS storage. Intended to run from `microcloud-backup.timer` on every node.
-- `restore-instance.sh` restores an instance from a backup written by `backup-instances.sh`.
-- `technitium-dns.sh` is a shared helper, sourced (not run directly) by `create-instance.sh`, `delete-instance.sh`, and `delete-project.sh` to register/remove DNS records in Technitium.
+- `backup/backup-instances.sh` exports every instance running on the local cluster member to NFS storage. Intended to run from `microcloud-backup.timer` on every node.
+- `backup/restore-instance.sh` restores an instance from a backup written by `backup-instances.sh`.
+- `dns/technitium-dns.sh` is a shared helper, sourced (not run directly) by `create-instance.sh`, `delete-instance.sh`, `delete-project.sh`, and `sync-dns-records.sh` to manage DNS records in Technitium.
+- `dns/sync-dns-records.sh` audits every instance across the whole cluster and creates or corrects any missing/stale Technitium DNS record.
+
+`.env` stays at the repository root and is shared by every script, including those in `dns/` and `backup/`.
 
 ### Command-line usage
 
@@ -184,6 +187,23 @@ When `--delete-instances` is used and Technitium is configured in `.env`, each d
 
 A normal delete run will refuse to proceed if the project still contains instances unless you pass `--delete-instances`.
 
+#### `sync-dns-records.sh`
+
+Audit every instance in every project (across the whole cluster, not just the local node) and create or correct its Technitium A record.
+
+Examples:
+
+```bash
+./dns/sync-dns-records.sh --dry-run
+./dns/sync-dns-records.sh
+```
+
+Supported arguments:
+
+- `--dry-run` reports what would be created or corrected without writing to Technitium.
+
+Instances without a stored forward IP are skipped. Existing records that already match are left alone. Use this to backfill DNS for instances created before this feature existed, or to recover after a Technitium outage caused a `create-instance.sh` registration to fail.
+
 #### `backup-instances.sh`
 
 Export every instance located on the local cluster member to the NFS backup directory, then prune backups older than the retention window.
@@ -191,9 +211,9 @@ Export every instance located on the local cluster member to the NFS backup dire
 Examples:
 
 ```bash
-./backup-instances.sh
-./backup-instances.sh --retention-days 14
-./backup-instances.sh --dry-run
+./backup/backup-instances.sh
+./backup/backup-instances.sh --retention-days 14
+./backup/backup-instances.sh --dry-run
 ```
 
 Supported arguments:
@@ -210,8 +230,8 @@ Restore an instance from a backup written by `backup-instances.sh`.
 Examples:
 
 ```bash
-./restore-instance.sh --project-id 42 --instance-name p42-tstng-ct01
-./restore-instance.sh --project-id 42 --instance-name p42-tstng-ct01 --backup-index 1 --new-name p42-tstng-ct02 --yes
+./backup/restore-instance.sh --project-id 42 --instance-name p42-tstng-ct01
+./backup/restore-instance.sh --project-id 42 --instance-name p42-tstng-ct01 --backup-index 1 --new-name p42-tstng-ct02 --yes
 ```
 
 Supported arguments:
@@ -290,6 +310,7 @@ If `TECHNITIUM_URL`, `TECHNITIUM_API_TOKEN`, or `TECHNITIUM_ZONE` is left blank,
 - `create-instance.sh` registers `<instance-name>.<zone>` -> the instance's forward IP right after the network forward is created.
 - `delete-instance.sh` and `delete-project.sh --delete-instances` remove that same record when they delete the instance's network forward.
 - Record management uses the instance's LXD name as the DNS hostname; renaming an instance in LXD does not update DNS.
+- `sync-dns-records.sh` backfills or corrects records for instances that predate this feature, or whose registration failed at creation time (e.g. Technitium was unreachable). See [`sync-dns-records.sh`](#sync-dns-recordssh) above.
 
 ---
 
@@ -327,7 +348,7 @@ BACKUP_RETENTION_DAYS='7'
 Deploy this repository (including `.env`) to the same path on every node, e.g. `/opt/microcloud-maintenance`. Then install the timer unit:
 
 ```bash
-cp systemd/microcloud-backup.service systemd/microcloud-backup.timer /etc/systemd/system/
+cp backup/systemd/microcloud-backup.service backup/systemd/microcloud-backup.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now microcloud-backup.timer
 ```
@@ -353,7 +374,7 @@ Each run also deletes files in that instance's directory older than `BACKUP_RETE
 
 ### Restoring
 
-Run `restore-instance.sh` on any node - it doesn't need to be the node the backup was taken on. See [`restore-instance.sh`](#restore-instancesh) above for usage.
+Run `backup/restore-instance.sh` on any node - it doesn't need to be the node the backup was taken on. See [`restore-instance.sh`](#restore-instancesh) above for usage.
 
 ---
 

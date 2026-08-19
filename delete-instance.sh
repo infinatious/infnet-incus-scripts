@@ -38,7 +38,7 @@ require_cmd() {
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
-DNS_LIB_FILE="${SCRIPT_DIR}/technitium-dns.sh"
+DNS_LIB_FILE="${SCRIPT_DIR}/dns/technitium-dns.sh"
 
 [[ -f "${ENV_FILE}" ]] || fail "${ENV_FILE} not found."
 # shellcheck source=/dev/null

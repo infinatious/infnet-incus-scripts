@@ -7,7 +7,8 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${SCRIPT_DIR}/.env"
+ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+ENV_FILE="${ROOT_DIR}/.env"
 
 fail() {
   echo "Error: $*" >&2

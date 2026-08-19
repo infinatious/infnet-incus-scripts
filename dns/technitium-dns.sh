@@ -38,6 +38,25 @@ dns_register_record() {
   return 0
 }
 
+dns_lookup_record_ip() {
+  local fqdn="$1" response ip
+
+  technitium_configured || return 1
+
+  response="$(curl -sS -G "${TECHNITIUM_URL%/}/api/zones/records/get" \
+    --data-urlencode "token=${TECHNITIUM_API_TOKEN}" \
+    --data-urlencode "domain=${fqdn}" \
+    --data-urlencode "zone=${TECHNITIUM_ZONE}" \
+    --data-urlencode "listZone=false" 2>&1)"
+  [[ $? -eq 0 ]] || return 1
+  [[ "$(jq -r '.status // empty' <<< "${response}" 2>/dev/null)" == 'ok' ]] || return 1
+
+  ip="$(jq -r '.response.records[]? | select(.type == "A") | .rData.ipAddress // empty' <<< "${response}" 2>/dev/null | head -n1)"
+  [[ -n "${ip}" ]] || return 1
+
+  printf '%s\n' "${ip}"
+}
+
 dns_deregister_record() {
   local fqdn="$1" ip="$2" response
 
