@@ -42,6 +42,8 @@ case "${ID,,}" in
     dnf install make -y
     dnf install gcc -y
     dnf install links -y
+    dnf install curl -y
+    dnf install jq -y
     dnf install dnf-automatic -y
     sed -i 's/^apply_updates =.*/apply_updates = yes/' /etc/dnf/automatic.conf
     sed -i 's/^download_updates =.*/download_updates = yes/' /etc/dnf/automatic.conf
@@ -52,7 +54,7 @@ case "${ID,,}" in
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
     apt-get upgrade -y
-    apt-get install -y open-vm-tools nfs-common htop btop vim git wget make gcc links unattended-upgrades apt-listchanges
+    apt-get install -y open-vm-tools nfs-common htop btop vim git wget make gcc links curl jq unattended-upgrades apt-listchanges
     cat <<'EOF' > /etc/apt/apt.conf.d/20auto-upgrades
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Download-Upgradeable-Packages "1";

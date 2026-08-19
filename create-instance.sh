@@ -43,6 +43,19 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "required command '$1' not found in PATH."
 }
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/.env"
+DNS_LIB_FILE="${SCRIPT_DIR}/technitium-dns.sh"
+
+[[ -f "${ENV_FILE}" ]] || fail "${ENV_FILE} not found."
+# shellcheck source=/dev/null
+source "${ENV_FILE}"
+[[ -f "${DNS_LIB_FILE}" ]] || fail "${DNS_LIB_FILE} not found."
+# shellcheck source=/dev/null
+source "${DNS_LIB_FILE}"
+
+ARGS_PROVIDED=$#
+
 PROJECT_ID_ARG=''
 ENV_CODE_ARG=''
 SERVICE_CODE_ARG=''
@@ -118,6 +131,7 @@ done
 require_cmd lxc
 require_cmd jq
 require_cmd python3
+require_cmd curl
 
 mapfile -t PROJECT_OPTIONS < <(
   lxc project list --format csv 2>/dev/null | while IFS=',' read -r PROJECT_NAME _ _ _ _ _ _ PROJECT_DESCRIPTION _; do
@@ -361,10 +375,15 @@ run lxc network forward create "${NETWORK_NAME}" --project "${PROJECT_NAME}" --a
 LISTEN_IPV4="$(lxc network forward list "${NETWORK_NAME}" --project "${PROJECT_NAME}" --format json | jq -r --arg target "${INSTANCE_IPV4}" '.[] | select(.config.target_address == $target) | .listen_address' | tail -n1)"
 [[ -n "${LISTEN_IPV4}" && "${LISTEN_IPV4}" != 'null' ]] || fail 'unable to determine allocated forward listen IPv4 address.'
 
+DNS_FQDN="${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}"
+dns_register_record "${DNS_FQDN}" "${LISTEN_IPV4}" || true
+
 if [[ -n "${DESCRIPTION_SUFFIX_ARG}" ]]; then
   DESCRIPTION_SUFFIX="${DESCRIPTION_SUFFIX_ARG}"
-else
+elif (( ARGS_PROVIDED == 0 )); then
   read -r -p 'Description suffix (optional): ' DESCRIPTION_SUFFIX
+else
+  DESCRIPTION_SUFFIX=''
 fi
 DESCRIPTION_TEXT="${LISTEN_IPV4} ${SELECTED_ALIAS}"
 if [[ -n "${DESCRIPTION_SUFFIX}" ]]; then
@@ -401,3 +420,6 @@ echo "Boot disk   : ${DISK_GIB}GiB"
 echo "Instance IP : ${INSTANCE_IPV4}"
 echo "Forward IP  : ${LISTEN_IPV4}"
 echo "Description : ${DESCRIPTION_TEXT}"
+if technitium_configured; then
+  echo "DNS         : ${DNS_FQDN} -> ${LISTEN_IPV4}"
+fi

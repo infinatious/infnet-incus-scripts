@@ -13,6 +13,7 @@ On the MicroCloud host, ensure the following are available:
 - `bash`
 - `jq`
 - `python3`
+- `curl`
 
 The scripts in this repository assume that:
 
@@ -81,6 +82,7 @@ These scripts are intended for a project-based workflow on a MicroCloud host.
 - `delete-project.sh` deletes all profiles in a project, removes the network, and destroys the project.
 - `backup-instances.sh` exports every instance running on the local cluster member to NFS storage. Intended to run from `microcloud-backup.timer` on every node.
 - `restore-instance.sh` restores an instance from a backup written by `backup-instances.sh`.
+- `technitium-dns.sh` is a shared helper, sourced (not run directly) by `create-instance.sh`, `delete-instance.sh`, and `delete-project.sh` to register/remove DNS records in Technitium.
 
 ### Command-line usage
 
@@ -119,7 +121,9 @@ Supported arguments:
 - `--image-alias` can be supplied instead of `--image-index` when you know the exact alias.
 - `--description-suffix` appends an optional text suffix to the instance description.
 
-If you omit any of these positional choices, the script will prompt for the missing values.
+If you omit any of these positional choices, the script will prompt for the missing values. The description suffix is the one exception: it's only prompted for when the script is run with *no* arguments at all. As soon as any argument is passed, an omitted `--description-suffix` is treated as empty rather than prompted for, since it's a genuinely optional field and a scripted invocation shouldn't block on stdin for it.
+
+If Technitium is configured in `.env` (see [DNS registration](#dns-registration)), the script also registers `<instance-name>.<zone>` pointing at the instance's forward IP.
 
 #### `resize-instance.sh`
 
@@ -157,6 +161,8 @@ Supported arguments:
 - `--instance-name` deletes the instance directly by exact LXD instance name.
 - `--yes` skips the final confirmation prompt.
 
+If Technitium is configured in `.env`, the script also removes the instance's `<instance-name>.<zone>` record.
+
 #### `delete-project.sh`
 
 Delete all profiles, remove the OVN network, and remove an entire project.
@@ -173,6 +179,8 @@ Supported arguments:
 - `--project-id` selects the project by numeric project ID.
 - `--delete-instances` stops and deletes every instance in the project before the project itself is removed.
 - `--yes` skips the confirmation prompt for the instance cleanup. Probably shouldn't use this.
+
+When `--delete-instances` is used and Technitium is configured in `.env`, each deleted instance's DNS record is removed alongside its network forward.
 
 A normal delete run will refuse to proceed if the project still contains instances unless you pass `--delete-instances`.
 
@@ -249,6 +257,39 @@ If you omit the project, instance, or backup selection, the script will prompt f
 2. The script removes every profile in the project first.
 3. It then removes the project network.
 4. Finally, it deletes the project itself.
+
+---
+
+## DNS registration
+
+`create-instance.sh` and `delete-instance.sh`/`delete-project.sh` can register and remove an A record in [Technitium DNS](https://technitium.com/dns/) for each instance, pointing `<instance-name>.<zone>` (e.g. `p42-tstng-ct01.infnet`) at the instance's forward IP - its external, NAT'd address, not its internal OVN address. This is entirely driven by `technitium-dns.sh`, a small shared helper sourced by all three scripts.
+
+### 1. Create an API token in Technitium
+
+DNS registration is best-effort and non-blocking: if Technitium is unreachable or misconfigured, the affected script prints a warning to stderr and continues rather than failing the deployment or decom.
+
+In the Technitium web console, go to Administration > Sessions > Create Token, and create a token for a user with permission to manage the zone in question. Unlike a login session, a token doesn't expire.
+
+### 2. Configure `.env`
+
+Set these values in `.env` on the host(s) that run `create-instance.sh`, `delete-instance.sh`, and `delete-project.sh`:
+
+```
+TECHNITIUM_URL='http://dns.example.infnet:5380'
+TECHNITIUM_API_TOKEN='...'
+TECHNITIUM_ZONE='infnet'
+TECHNITIUM_DNS_TTL='3600'
+```
+
+The `infnet` zone must already exist in Technitium; the scripts only add and remove records within it, they don't create the zone itself.
+
+If `TECHNITIUM_URL`, `TECHNITIUM_API_TOKEN`, or `TECHNITIUM_ZONE` is left blank, DNS registration is skipped entirely (with a warning) and the scripts behave exactly as they did before this feature existed.
+
+### Behavior
+
+- `create-instance.sh` registers `<instance-name>.<zone>` -> the instance's forward IP right after the network forward is created.
+- `delete-instance.sh` and `delete-project.sh --delete-instances` remove that same record when they delete the instance's network forward.
+- Record management uses the instance's LXD name as the DNS hostname; renaming an instance in LXD does not update DNS.
 
 ---
 

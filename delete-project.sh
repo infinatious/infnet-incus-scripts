@@ -31,6 +31,17 @@ run() {
   "$@" || fail "command failed: $*"
 }
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/.env"
+DNS_LIB_FILE="${SCRIPT_DIR}/technitium-dns.sh"
+
+[[ -f "${ENV_FILE}" ]] || fail "${ENV_FILE} not found."
+# shellcheck source=/dev/null
+source "${ENV_FILE}"
+[[ -f "${DNS_LIB_FILE}" ]] || fail "${DNS_LIB_FILE} not found."
+# shellcheck source=/dev/null
+source "${DNS_LIB_FILE}"
+
 PROJECT_ID_ARG=''
 DELETE_INSTANCES_ARG=''
 CONFIRM_ARG=''
@@ -60,6 +71,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 command -v lxc >/dev/null 2>&1 || fail 'lxc command not found in PATH.'
+command -v jq >/dev/null 2>&1 || fail 'jq command not found in PATH.'
+command -v curl >/dev/null 2>&1 || fail 'curl command not found in PATH.'
 
 mapfile -t PROJECT_OPTIONS < <(
   lxc project list --format csv 2>/dev/null | while IFS=',' read -r PROJECT_NAME _ _ _ _ _ _ PROJECT_DESCRIPTION _; do
@@ -110,6 +123,7 @@ if [[ -n "${INSTANCE_LIST}" ]]; then
       if [[ -n "${FORWARD_IP}" ]]; then
         echo "Deleting forward '${FORWARD_IP}' on network '${NETWORK_NAME}'..."
         run lxc network forward delete "${NETWORK_NAME}" "${FORWARD_IP}" --project "${PROJECT_NAME}"
+        dns_deregister_record "${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}" "${FORWARD_IP}" || true
       fi
     done < <(printf '%s\n' "${INSTANCE_LIST}" | sed '/^$/d')
   else

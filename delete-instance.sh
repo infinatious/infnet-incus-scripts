@@ -36,6 +36,17 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "required command '$1' not found in PATH."
 }
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/.env"
+DNS_LIB_FILE="${SCRIPT_DIR}/technitium-dns.sh"
+
+[[ -f "${ENV_FILE}" ]] || fail "${ENV_FILE} not found."
+# shellcheck source=/dev/null
+source "${ENV_FILE}"
+[[ -f "${DNS_LIB_FILE}" ]] || fail "${DNS_LIB_FILE} not found."
+# shellcheck source=/dev/null
+source "${DNS_LIB_FILE}"
+
 PROJECT_ID_ARG=''
 INSTANCE_INDEX_ARG=''
 INSTANCE_NAME_ARG=''
@@ -72,6 +83,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 require_cmd lxc
+require_cmd jq
+require_cmd curl
 
 mapfile -t PROJECT_OPTIONS < <(
   lxc project list --format csv 2>/dev/null | while IFS=',' read -r PROJECT_NAME _ _ _ _ _ _ PROJECT_DESCRIPTION _; do
@@ -161,6 +174,7 @@ run lxc delete "${INSTANCE_NAME}" --project "${PROJECT_NAME}"
 if [[ -n "${FORWARD_IP}" ]]; then
   echo "Deleting forward '${FORWARD_IP}' on network '${NETWORK_NAME}'..."
   run lxc network forward delete "${NETWORK_NAME}" "${FORWARD_IP}" --project "${PROJECT_NAME}"
+  dns_deregister_record "${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}" "${FORWARD_IP}" || true
 else
   echo "No stored forward IP found on instance '${INSTANCE_NAME}', skipping forward deletion."
 fi
