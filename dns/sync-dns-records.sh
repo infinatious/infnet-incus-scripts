@@ -68,7 +68,7 @@ require_cmd curl
 
 technitium_configured || fail 'Technitium is not configured in .env (TECHNITIUM_URL, TECHNITIUM_API_TOKEN, TECHNITIUM_ZONE).'
 
-mapfile -t PROJECT_NAMES < <(lxc project list --format csv -c n 2>/dev/null || true)
+mapfile -t PROJECT_NAMES < <(lxc project list --format csv 2>/dev/null | cut -d',' -f1 || true)
 (( ${#PROJECT_NAMES[@]} > 0 )) || fail 'no projects found.'
 
 CREATED=0

@@ -96,7 +96,7 @@ prune_old_backups() {
 
 echo "Backing up instances located on cluster member '${LOCAL_MEMBER}' (retention: ${RETENTION_DAYS}d)..."
 
-mapfile -t PROJECT_NAMES < <(lxc project list --format csv -c n 2>/dev/null || true)
+mapfile -t PROJECT_NAMES < <(lxc project list --format csv 2>/dev/null | cut -d',' -f1 || true)
 (( ${#PROJECT_NAMES[@]} > 0 )) || fail 'no projects found.'
 
 BACKED_UP=0
