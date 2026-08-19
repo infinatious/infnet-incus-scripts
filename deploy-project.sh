@@ -6,13 +6,19 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 1
 fi
 
-UPLINK_NETWORK='UPLINK-NAT'
 OVN_MTU='1442'
-IPV4_SUBNET_PREFIX='10.127'
-STORAGE_POOL='zpool'
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CLOUD_INIT_FILE="${SCRIPT_DIR}/cloud-init-user-data.yaml"
 CLOUDBASE_INIT_FILE="${SCRIPT_DIR}/cloudbase-init-user-data.yaml"
+ENV_FILE="${SCRIPT_DIR}/.env"
+
+[[ -f "${ENV_FILE}" ]] || { echo "Error: ${ENV_FILE} not found." >&2; exit 1; }
+# shellcheck source=/dev/null
+source "${ENV_FILE}"
+
+: "${UPLINK_NETWORK:?UPLINK_NETWORK not set in ${ENV_FILE}}"
+: "${IPV4_SUBNET_PREFIX:?IPV4_SUBNET_PREFIX not set in ${ENV_FILE}}"
+: "${STORAGE_POOL:?STORAGE_POOL not set in ${ENV_FILE}}"
 
 fail() {
   echo "Error: $*" >&2
