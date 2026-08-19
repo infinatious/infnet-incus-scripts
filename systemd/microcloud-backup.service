@@ -1,0 +1,10 @@
+[Unit]
+Description=MicroCloud instance backup (local cluster member)
+After=network-online.target remote-fs.target
+Wants=network-online.target remote-fs.target
+ConditionPathIsMountPoint=/mnt/microcloud-backups
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/microcloud-maintenance
+ExecStart=/opt/microcloud-maintenance/backup-instances.sh

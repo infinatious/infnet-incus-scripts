@@ -79,6 +79,8 @@ These scripts are intended for a project-based workflow on a MicroCloud host.
 - `resize-instance.sh` resizes an existing instance in the selected project.
 - `delete-instance.sh` removes a single instance.
 - `delete-project.sh` deletes all profiles in a project, removes the network, and destroys the project.
+- `backup-instances.sh` exports every instance running on the local cluster member to NFS storage. Intended to run from `microcloud-backup.timer` on every node.
+- `restore-instance.sh` restores an instance from a backup written by `backup-instances.sh`.
 
 ### Command-line usage
 
@@ -174,6 +176,47 @@ Supported arguments:
 
 A normal delete run will refuse to proceed if the project still contains instances unless you pass `--delete-instances`.
 
+#### `backup-instances.sh`
+
+Export every instance located on the local cluster member to the NFS backup directory, then prune backups older than the retention window.
+
+Examples:
+
+```bash
+./backup-instances.sh
+./backup-instances.sh --retention-days 14
+./backup-instances.sh --dry-run
+```
+
+Supported arguments:
+
+- `--retention-days` overrides `BACKUP_RETENTION_DAYS` from `.env` for this run.
+- `--dry-run` prints what would be backed up and pruned without doing it.
+
+This script takes no interactive input and is meant to run unattended from `microcloud-backup.timer`. See [Backups](#backups) below for setup.
+
+#### `restore-instance.sh`
+
+Restore an instance from a backup written by `backup-instances.sh`.
+
+Examples:
+
+```bash
+./restore-instance.sh --project-id 42 --instance-name p42-tstng-ct01
+./restore-instance.sh --project-id 42 --instance-name p42-tstng-ct01 --backup-index 1 --new-name p42-tstng-ct02 --yes
+```
+
+Supported arguments:
+
+- `--project-id` selects the project the backup belongs to, by numeric project ID.
+- `--instance-name` is the original instance name; used to locate its backups.
+- `--backup-index` selects a backup from the numbered list (newest first).
+- `--backup-file` restores an exact tarball path instead of browsing.
+- `--new-name` restores under a different instance name (default: original name).
+- `--yes` skips the confirmation prompt.
+
+If you omit the project, instance, or backup selection, the script will prompt for them interactively. The script refuses to overwrite an existing instance with the same name - use `--new-name` or delete the existing instance first. The restored instance is imported stopped; start it manually once you've verified it. If the original instance had a network forward, recreate it with `lxc network forward create` after the restore.
+
 ### Deployment flow
 
 1. Run `deploy-project.sh` with `--project-name` and `--project-id`, or let it prompt if you omit them.
@@ -206,6 +249,70 @@ A normal delete run will refuse to proceed if the project still contains instanc
 2. The script removes every profile in the project first.
 3. It then removes the project network.
 4. Finally, it deletes the project itself.
+
+---
+
+## Backups
+
+`backup-instances.sh` and `restore-instance.sh` back instances up to a shared NFS export and restore them from it. Every node in the cluster runs the same script on its own timer; each node only backs up the instances currently located on itself, so the full cluster's instances are covered without any single node having to reach across to the others.
+
+### 1. Export and mount the NFS share
+
+On the NFS server, export a directory that all cluster nodes can reach. On each MicroCloud node (`nfs-common`/`nfs-utils` is already installed by `post-install.sh`), mount that export at the same path used by `NFS_BACKUP_DIR` in `.env`, for example:
+
+```
+# /etc/fstab, on every node
+nfs-server.example.com:/export/microcloud-backups  /mnt/microcloud-backups  nfs  defaults,_netdev  0  0
+```
+
+```bash
+mkdir -p /mnt/microcloud-backups
+mount /mnt/microcloud-backups
+```
+
+`backup-instances.sh` refuses to run if `NFS_BACKUP_DIR` isn't an actual mount point, so it won't silently fill up the local root disk if the NFS mount is down.
+
+### 2. Configure `.env` on every node
+
+Set (or confirm) these values in `.env` on each node - they should match on every node in the cluster:
+
+```
+NFS_BACKUP_DIR='/mnt/microcloud-backups'
+BACKUP_RETENTION_DAYS='7'
+```
+
+### 3. Install the scripts and systemd timer on every node
+
+Deploy this repository (including `.env`) to the same path on every node, e.g. `/opt/microcloud-maintenance`. Then install the timer unit:
+
+```bash
+cp systemd/microcloud-backup.service systemd/microcloud-backup.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now microcloud-backup.timer
+```
+
+The shipped units assume the repository lives at `/opt/microcloud-maintenance` and that `NFS_BACKUP_DIR` is `/mnt/microcloud-backups`. If either differs on your site, update `ExecStart`/`WorkingDirectory` in `microcloud-backup.service` and `ConditionPathIsMountPoint` to match before copying them in.
+
+By default the timer runs nightly at 02:00 with up to a 20 minute random delay (`RandomizedDelaySec`), so all cluster nodes don't hit the NFS server at the exact same moment. Check a node's recent runs with:
+
+```bash
+systemctl status microcloud-backup.timer
+journalctl -u microcloud-backup.service
+```
+
+### Backup layout and retention
+
+Backups are written as:
+
+```
+${NFS_BACKUP_DIR}/<project>/<instance>/<instance>_<timestamp>.tar.gz
+```
+
+Each run also deletes files in that instance's directory older than `BACKUP_RETENTION_DAYS` (default `7`). Backups are point-in-time exports of the instance's storage volume via `lxc export --optimized-storage`, taken without stopping the instance first - treat them as crash-consistent, not necessarily transaction-consistent for things like databases.
+
+### Restoring
+
+Run `restore-instance.sh` on any node - it doesn't need to be the node the backup was taken on. See [`restore-instance.sh`](#restore-instancesh) above for usage.
 
 ---
 
