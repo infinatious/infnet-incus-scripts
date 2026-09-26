@@ -214,11 +214,17 @@ Examples:
 ./backup/backup-instances.sh
 ./backup/backup-instances.sh --retention-days 14
 ./backup/backup-instances.sh --dry-run
+./backup/backup-instances.sh --project p42-testing --instance p42-tstng-ct01 --tag adhoc --description 'before upgrade' --no-prune
 ```
 
 Supported arguments:
 
 - `--retention-days` overrides `BACKUP_RETENTION_DAYS` from `.env` for this run.
+- `--project` limits the run to one project.
+- `--instance` limits the run to one instance (it must be located on the local cluster member). The run fails if it isn't found.
+- `--tag` appends a tag to the file name (`<instance>_<timestamp>_<tag>.tar.gz`), e.g. `adhoc` for manual backups.
+- `--description` stores a free-text note in the backup's `.json` metadata sidecar.
+- `--no-prune` skips retention pruning for this run.
 - `--dry-run` prints what would be backed up and pruned without doing it.
 
 This script takes no interactive input and is meant to run unattended from `microcloud-backup.timer`. See [Backups](#backups) below for setup.
@@ -367,8 +373,11 @@ journalctl -u microcloud-backup.service
 Backups are written as:
 
 ```
-${NFS_BACKUP_DIR}/<project>/<instance>/<instance>_<timestamp>.tar.gz
+${NFS_BACKUP_DIR}/<project>/<instance>/<instance>_<timestamp>[_<tag>].tar.gz
+${NFS_BACKUP_DIR}/<project>/<instance>/<instance>_<timestamp>[_<tag>].tar.gz.json
 ```
+
+The `.json` sidecar records the project, instance, cluster member, tag, description, creation time and size. Tagged (e.g. ad-hoc) backups follow the same retention as scheduled ones.
 
 Each run also deletes files in that instance's directory older than `BACKUP_RETENTION_DAYS` (default `7`). Backups are point-in-time exports of the instance's storage volume via `lxc export --optimized-storage`, taken without stopping the instance first - treat them as crash-consistent, not necessarily transaction-consistent for things like databases.
 
