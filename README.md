@@ -206,7 +206,7 @@ Instances without a stored forward IP are skipped. Existing records that already
 
 #### `backup-instances.sh`
 
-Export instances to the NFS backup directory, then prune backups older than the retention window. By default it covers the instances on the cluster member the `lxc` client talks to (the local node when run on a host). From outside the cluster, for example the MicroCloud Vault VM (the `microcloud-backup-ui` repository), it can back up every member through the LXD API.
+Export instances to the NFS backup directory, then prune backups older than the retention window. By default it covers the instances on the cluster member the `lxc` client talks to (the local node when run on a host). From outside the cluster, for example the [MicroCloud Vault](https://github.com/infinatious/microcloud-backup-manager) VM, it can back up every member through the LXD API.
 
 Examples:
 
@@ -417,7 +417,7 @@ Run `backup/restore-instance.sh` on any node - it doesn't need to be the node th
 
 ### Running backups from the MicroCloud Vault VM
 
-`microcloud-backup-ui` deploys a small VM that holds a trusted `lxc` client certificate and mounts the same NFS export. It calls `backup-instances.sh --all-members` for ad-hoc backups and `restore-instance.sh` for restores. You can keep the per-node `microcloud-backup.timer` (the default), or let the VM run the nightly backup for the whole cluster instead. If you switch to the VM, disable the timer on every node.
+[MicroCloud Vault](https://github.com/infinatious/microcloud-backup-manager) deploys a small VM that holds a trusted `lxc` client certificate and mounts the same NFS export. It calls `backup-instances.sh --all-members` for ad-hoc backups and `restore-instance.sh` for restores. You can keep the per-node `microcloud-backup.timer` (the default), or let the VM run the nightly backup for the whole cluster instead. If you switch to the VM, disable the timer on every node.
 
 ---
 
