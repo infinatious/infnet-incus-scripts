@@ -206,7 +206,7 @@ Instances without a stored forward IP are skipped. Existing records that already
 
 #### `backup-instances.sh`
 
-Export instances to the NFS backup directory, then prune backups older than the retention window. By default it covers the instances on the cluster member the `lxc` client talks to (the local node when run on a host). From outside the cluster, for example the [MicroCloud Vault](https://github.com/infinatious/microcloud-backup-manager) VM, it can back up every member through the LXD API.
+Export instances to the NFS backup directory, then prune backups on a tiered retention schedule (see [Backup layout and retention](#backup-layout-and-retention)). By default it covers the instances on the cluster member the `lxc` client talks to (the local node when run on a host). From outside the cluster, for example the [MicroCloud Vault](https://github.com/infinatious/microcloud-backup-manager) VM, it can back up every member through the LXD API.
 
 Examples:
 
@@ -221,7 +221,9 @@ Examples:
 
 Supported arguments:
 
-- `--retention-days` overrides `BACKUP_RETENTION_DAYS` from `.env` for this run.
+- `--retention-days` overrides `BACKUP_RETENTION_DAYS` from `.env` for this run (length of the daily tier).
+- `--weekly-weeks` overrides `BACKUP_WEEKLY_RETENTION_WEEKS` (number of weekly buckets after the daily tier).
+- `--retention-months` overrides `BACKUP_RETENTION_MONTHS` (total age, in months, after which a backup is deleted outright).
 - `--all-members` backs up instances on every cluster member, not just the one the client talks to.
 - `--member` backs up only instances located on the named member (can't be combined with `--all-members`).
 - `--project` limits the run to one project.
@@ -352,6 +354,8 @@ Set (or confirm) these values in `.env` on each node - they should match on ever
 ```
 NFS_BACKUP_DIR='/mnt/microcloud-backups'
 BACKUP_RETENTION_DAYS='7'
+BACKUP_WEEKLY_RETENTION_WEEKS='3'
+BACKUP_RETENTION_MONTHS='6'
 ```
 
 ### 3. Install the scripts and systemd timer on every node
@@ -401,7 +405,26 @@ Every run that isn't a dry run also writes a run record to `${NFS_BACKUP_DIR}/.r
 
 Tagged (e.g. ad-hoc) backups follow the same retention as scheduled ones.
 
-Each run also deletes files in that instance's directory older than `BACKUP_RETENTION_DAYS` (default `7`). Backups are point-in-time exports of the instance's storage volume via `lxc export --optimized-storage`, taken without stopping the instance first - treat them as crash-consistent, not necessarily transaction-consistent for things like databases.
+Each run prunes that instance's directory on a tiered (grandfather-father-son) schedule, driven by three `.env` settings:
+
+| Tier | Setting (default) | Behavior |
+|---|---|---|
+| Daily | `BACKUP_RETENTION_DAYS` (`7`) | Every backup younger than this many days is kept. |
+| Weekly | `BACKUP_WEEKLY_RETENTION_WEEKS` (`3`) | For this many weeks after the daily tier, only the newest backup in each 7-day bucket survives. |
+| Monthly | `BACKUP_RETENTION_MONTHS` (`6`) | Beyond the daily+weekly window, only the newest backup in each ~30-day bucket survives, up to this many months of *total* age from today. Anything older is deleted outright. |
+
+With the defaults, a backup's total lifespan looks like:
+
+```
+0-7d    every backup kept               (daily)
+8-28d   newest per 7-day bucket kept    (weekly, 3 buckets)
+29-180d newest per ~30-day bucket kept  (monthly, ~5 buckets)
+>180d   deleted
+```
+
+Bucket boundaries are rolling day-counts from the moment each run starts, not calendar weeks/months. Buckets are computed independently per instance, so an instance with only occasional backups just keeps whichever ones it has; nothing is deleted to "fill" a schedule that was never met. Each run's `retention_days`/`weekly_weeks`/`retention_months` are recorded in its run record for auditing.
+
+Each run also deletes files in that instance's directory outside this window. Backups are point-in-time exports of the instance's storage volume via `lxc export --optimized-storage`, taken without stopping the instance first - treat them as crash-consistent, not necessarily transaction-consistent for things like databases.
 
 ### Restoring
 
