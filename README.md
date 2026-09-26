@@ -206,7 +206,7 @@ Instances without a stored forward IP are skipped. Existing records that already
 
 #### `backup-instances.sh`
 
-Export every instance located on the local cluster member to the NFS backup directory, then prune backups older than the retention window.
+Export instances to the NFS backup directory, then prune backups older than the retention window. By default it covers the instances on the cluster member the `lxc` client talks to (the local node when run on a host). From outside the cluster, for example the MicroCloud Vault VM (the `microcloud-backup-ui` repository), it can back up every member through the LXD API.
 
 Examples:
 
@@ -215,16 +215,21 @@ Examples:
 ./backup/backup-instances.sh --retention-days 14
 ./backup/backup-instances.sh --dry-run
 ./backup/backup-instances.sh --project p42-testing --instance p42-tstng-ct01 --tag adhoc --description 'before upgrade' --no-prune
+./backup/backup-instances.sh --all-members                   # every instance in the cluster
+./backup/backup-instances.sh --member mc-node2 --dry-run     # only instances on mc-node2
 ```
 
 Supported arguments:
 
 - `--retention-days` overrides `BACKUP_RETENTION_DAYS` from `.env` for this run.
+- `--all-members` backs up instances on every cluster member, not just the one the client talks to.
+- `--member` backs up only instances located on the named member (can't be combined with `--all-members`).
 - `--project` limits the run to one project.
-- `--instance` limits the run to one instance (it must be located on the local cluster member). The run fails if it isn't found.
+- `--instance` limits the run to one instance, which must be within the member scope above. The run fails if it isn't found.
 - `--tag` appends a tag to the file name (`<instance>_<timestamp>_<tag>.tar.gz`), e.g. `adhoc` for manual backups.
 - `--description` stores a free-text note in the backup's `.json` metadata sidecar.
-- `--no-prune` skips retention pruning for this run.
+- `--requested-by` records who asked for the run, in the sidecar and the run record.
+- `--no-prune` skips retention pruning for this run (backups and run records).
 - `--dry-run` prints what would be backed up and pruned without doing it.
 
 This script takes no interactive input and is meant to run unattended from `microcloud-backup.timer`. See [Backups](#backups) below for setup.
@@ -377,13 +382,42 @@ ${NFS_BACKUP_DIR}/<project>/<instance>/<instance>_<timestamp>[_<tag>].tar.gz
 ${NFS_BACKUP_DIR}/<project>/<instance>/<instance>_<timestamp>[_<tag>].tar.gz.json
 ```
 
-The `.json` sidecar records the project, instance, cluster member, tag, description, creation time and size. Tagged (e.g. ad-hoc) backups follow the same retention as scheduled ones.
+Exports are written as `<file>.tar.gz.partial` and renamed only once `lxc export` succeeds, so an interrupted export never looks like a restorable backup. A failed export is logged and the run moves on to the next instance. The script then exits non-zero and lists the failures in its run record.
+
+The `.json` sidecar records:
+
+```jsonc
+{
+  "project": "p42-testing", "instance": "p42-tstng-ct01",
+  "member": "mc-node1",          // where the instance was located
+  "runner": "microcloud-vault",  // host that ran the backup (BACKUP_RUNNER_NAME or hostname)
+  "run_id": "20260926-174851_microcloud-vault_5144",
+  "tag": "adhoc", "description": "before upgrade", "requested_by": "admin",
+  "created_at": "2026-09-26T17:48:55Z", "size_bytes": 1652555776
+}
+```
+
+Every run that isn't a dry run also writes a run record to `${NFS_BACKUP_DIR}/.runs/<UTC timestamp>_<runner>_<pid>.json`, whether it succeeds or fails. The record holds the scope, the result, the files written, any per-instance failures, and what was pruned. Because it lives on the shared NFS export, the history covers every node and the Vault VM, which journald can't do. Run records older than `BACKUP_RUN_HISTORY_DAYS` (default `90`) are pruned along with backups.
+
+Tagged (e.g. ad-hoc) backups follow the same retention as scheduled ones.
 
 Each run also deletes files in that instance's directory older than `BACKUP_RETENTION_DAYS` (default `7`). Backups are point-in-time exports of the instance's storage volume via `lxc export --optimized-storage`, taken without stopping the instance first - treat them as crash-consistent, not necessarily transaction-consistent for things like databases.
 
 ### Restoring
 
 Run `backup/restore-instance.sh` on any node - it doesn't need to be the node the backup was taken on. See [`restore-instance.sh`](#restore-instancesh) above for usage.
+
+### Optional `.env` settings
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `BACKUP_RUN_HISTORY_DAYS` | `90` | How long run records in `.runs/` are kept |
+| `BACKUP_RUNNER_NAME` | short hostname | Name recorded as `runner` in sidecars and run records |
+| `LXD_CONF` (exported) | lxc default | Client config dir, e.g. for the Vault VM's dedicated cluster remote |
+
+### Running backups from the MicroCloud Vault VM
+
+`microcloud-backup-ui` deploys a small VM that holds a trusted `lxc` client certificate and mounts the same NFS export. It calls `backup-instances.sh --all-members` for ad-hoc backups and `restore-instance.sh` for restores. You can keep the per-node `microcloud-backup.timer` (the default), or let the VM run the nightly backup for the whole cluster instead. If you switch to the VM, disable the timer on every node.
 
 ---
 
