@@ -368,12 +368,12 @@ MATCHED=0
 for PROJECT_NAME in "${PROJECT_NAMES[@]}"; do
   [[ -n "${PROJECT_NAME}" ]] || continue
 
-  mapfile -t INSTANCE_ROWS < <(lxc list --project "${PROJECT_NAME}" -c nL -f csv 2>/dev/null || true)
+  mapfile -t INSTANCE_ROWS < <(lxc list --project "${PROJECT_NAME}" -c nLt -f csv 2>/dev/null || true)
   (( ${#INSTANCE_ROWS[@]} > 0 )) || continue
 
   for INSTANCE_ROW in "${INSTANCE_ROWS[@]}"; do
     [[ -n "${INSTANCE_ROW}" ]] || continue
-    IFS=',' read -r INSTANCE_NAME INSTANCE_LOCATION <<< "${INSTANCE_ROW}"
+    IFS=',' read -r INSTANCE_NAME INSTANCE_LOCATION INSTANCE_TYPE <<< "${INSTANCE_ROW}"
     [[ -z "${INSTANCE_FILTER}" || "${INSTANCE_NAME}" == "${INSTANCE_FILTER}" ]] || continue
     if [[ -n "${TARGET_MEMBER}" && "${INSTANCE_LOCATION}" != "${TARGET_MEMBER}" ]]; then
       [[ -n "${INSTANCE_FILTER}" ]] && echo "Skipping '${INSTANCE_NAME}': located on '${INSTANCE_LOCATION}', not '${TARGET_MEMBER}'."
@@ -393,7 +393,16 @@ for PROJECT_NAME in "${PROJECT_NAMES[@]}"; do
       # Export to a .partial name and rename on success, so an interrupted or
       # failed export never looks like a restorable backup.
       CURRENT_PARTIAL="${BACKUP_FILE}.partial"
-      if lxc export "${INSTANCE_NAME}" "${CURRENT_PARTIAL}" --project "${PROJECT_NAME}" --optimized-storage --compression gzip 2> "${WORK_DIR}/export.err" \
+      # --optimized-storage does a ZFS snapshot diff, but on VMs it walks both
+      # the instance's config dataset and its .block dataset and miscounts
+      # their identically-named snapshots, failing with "Snapshot ... in
+      # storage but not expected" even when storage and LXD's DB agree (see
+      # https://discuss.linuxcontainers.org/t/lxc-export-snapshot-in-storage-but-not-expected/11756).
+      # Containers only have one dataset and aren't affected, so keep the
+      # faster optimized path for them.
+      EXPORT_OPTS=(--project "${PROJECT_NAME}" --compression gzip)
+      [[ "${INSTANCE_TYPE}" == 'VIRTUAL-MACHINE' || "${INSTANCE_TYPE}" == 'virtual-machine' ]] || EXPORT_OPTS+=(--optimized-storage)
+      if lxc export "${INSTANCE_NAME}" "${CURRENT_PARTIAL}" "${EXPORT_OPTS[@]}" 2> "${WORK_DIR}/export.err" \
          && mv -f -- "${CURRENT_PARTIAL}" "${BACKUP_FILE}"; then
         CURRENT_PARTIAL=''
         write_metadata "${BACKUP_FILE}" "${PROJECT_NAME}" "${INSTANCE_NAME}" "${INSTANCE_LOCATION}"
