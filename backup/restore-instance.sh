@@ -23,6 +23,11 @@ Restores an instance from a backup written by backup-instances.sh. The
 restored instance is created in the same project it was backed up from,
 under its original name unless --new-name is given.
 
+If the backed-up instance had a 1:1 NAT public IP, its network forward is
+recreated before the import (Incus refuses the import otherwise). The restore
+is refused while another instance still owns that public IP, since a second
+copy would share the original's NAT identity - delete the original first.
+
 Options:
   --project-id ID       Numeric project ID that owns the backup.
   --instance-name NAME  Original instance name; used to locate its backups.
@@ -50,6 +55,9 @@ require_cmd() {
 # shellcheck source=/dev/null
 source "${ENV_FILE}"
 : "${NFS_BACKUP_DIR:?NFS_BACKUP_DIR not set in ${ENV_FILE}}"
+[[ -f "${ROOT_DIR}/lib/public-ip.sh" ]] || fail "${ROOT_DIR}/lib/public-ip.sh not found."
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/public-ip.sh"
 
 PROJECT_ID_ARG=''
 INSTANCE_NAME_ARG=''
@@ -98,17 +106,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-require_cmd lxc
+require_cmd incus
+require_cmd jq
+require_cmd python3
+require_cmd tar
 
 mountpoint -q "${NFS_BACKUP_DIR}" || fail "'${NFS_BACKUP_DIR}' is not a mounted filesystem."
 
 mapfile -t PROJECT_OPTIONS < <(
-  lxc project list --format csv 2>/dev/null | while IFS=',' read -r PROJECT_NAME _ _ _ _ _ _ PROJECT_DESCRIPTION _; do
-    [[ -n "${PROJECT_NAME}" ]] || continue
-    if [[ "${PROJECT_DESCRIPTION}" =~ ^Project[[:space:]]ID:[[:space:]]([0-9]+)$ ]]; then
-      printf '%s\t%s\n' "${BASH_REMATCH[1]}" "${PROJECT_NAME}"
-    fi
-  done
+  incus project list -f json 2>/dev/null \
+    | jq -r '.[] | select(.description | test("^Project ID: [0-9]+$")) | "\(.description | ltrimstr("Project ID: "))\t\(.name)"'
 )
 (( ${#PROJECT_OPTIONS[@]} > 0 )) || fail 'no projects with project ID metadata were found.'
 
@@ -126,7 +133,7 @@ fi
 PROJECT_NAME="$(awk -F '\t' -v pid="${SELECTED_PROJECT_ID}" '$1 == pid {print $2}' <<< "$(printf '%s\n' "${PROJECT_OPTIONS[@]}")")"
 [[ -n "${PROJECT_NAME}" ]] || fail "project ID '${SELECTED_PROJECT_ID}' is not available."
 
-lxc project show "${PROJECT_NAME}" >/dev/null 2>&1 || fail "project '${PROJECT_NAME}' does not exist."
+incus project show "${PROJECT_NAME}" >/dev/null 2>&1 || fail "project '${PROJECT_NAME}' does not exist."
 
 if [[ -n "${BACKUP_FILE_ARG}" ]]; then
   BACKUP_FILE="${BACKUP_FILE_ARG}"
@@ -170,14 +177,54 @@ fi
 
 TARGET_NAME="${NEW_NAME_ARG:-${INSTANCE_NAME}}"
 
-lxc info "${TARGET_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 && \
+incus info "${TARGET_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 && \
   fail "instance '${TARGET_NAME}' already exists in project '${PROJECT_NAME}'. Use --new-name or delete the existing instance first."
+
+# The instance's 1:1 NAT lives in its NIC config (ipv4.address.external),
+# which Incus only accepts when a matching network forward exists.
+NAT_INFO="$(tar -xOf "${BACKUP_FILE}" --occurrence=1 backup/index.yaml 2>/dev/null | python3 -c '
+import sys, yaml
+def walk(node):
+    if isinstance(node, dict):
+        if node.get("ipv4.address.external"):
+            yield node
+        for value in node.values():
+            yield from walk(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from walk(value)
+try:
+    data = yaml.safe_load(sys.stdin) or {}
+except yaml.YAMLError:
+    sys.exit(0)
+for nic in walk(data):
+    print("\t".join([nic["ipv4.address.external"], nic.get("ipv4.address", ""), nic.get("network", "")]))
+    break
+')"
+NAT_PUBLIC=''
+NAT_FORWARD_CREATED=''
+if [[ -n "${NAT_INFO}" ]]; then
+  IFS=$'\t' read -r NAT_PUBLIC NAT_INTERNAL NAT_NETWORK <<< "${NAT_INFO}"
+  [[ -n "${NAT_INTERNAL}" && -n "${NAT_NETWORK}" ]] || fail "backup has public IP ${NAT_PUBLIC} but no pinned internal address or network; restore it manually."
+  incus network show "${NAT_NETWORK}" --project "${PROJECT_NAME}" >/dev/null 2>&1 \
+    || fail "network '${NAT_NETWORK}' from the backup does not exist in project '${PROJECT_NAME}'."
+  if incus network forward show "${NAT_NETWORK}" "${NAT_PUBLIC}" --project "${PROJECT_NAME}" >/dev/null 2>&1; then
+    NAT_OWNER="$(nat_find_owner "${PROJECT_NAME}" "${NAT_PUBLIC}")"
+    [[ -z "${NAT_OWNER}" ]] || fail "public IP ${NAT_PUBLIC} still belongs to '${NAT_OWNER}'. Delete that instance first; a restored copy would share its 1:1 NAT identity."
+  else
+    nat_validate_address "$(nat_network_uplink "${NAT_NETWORK}" "${PROJECT_NAME}")" "${NAT_PUBLIC}" || exit 1
+    NAT_FORWARD_CREATED='pending'
+  fi
+fi
 
 echo
 echo 'Ready to restore:'
 echo "Project           : ${PROJECT_NAME}"
 echo "Backup file        : ${BACKUP_FILE}"
 echo "Restored as        : ${TARGET_NAME}"
+if [[ -n "${NAT_PUBLIC}" ]]; then
+  echo "Public IP          : ${NAT_PUBLIC} -> ${NAT_INTERNAL} (1:1 NAT on '${NAT_NETWORK}')"
+fi
 
 if [[ -n "${CONFIRM_ARG}" ]]; then
   CONFIRM='yes'
@@ -186,8 +233,25 @@ else
 fi
 [[ "${CONFIRM}" == 'yes' ]] || fail 'restore cancelled.'
 
+if [[ -n "${NAT_PUBLIC}" ]]; then
+  if [[ "${NAT_FORWARD_CREATED}" == 'pending' ]]; then
+    echo "Recreating network forward ${NAT_PUBLIC} -> ${NAT_INTERNAL}..."
+    run incus network forward create "${NAT_NETWORK}" "${NAT_PUBLIC}" target_address="${NAT_INTERNAL}" --project "${PROJECT_NAME}"
+    NAT_FORWARD_CREATED='yes'
+  else
+    echo "Reusing existing network forward ${NAT_PUBLIC}, pointing it at ${NAT_INTERNAL}..."
+    run incus network forward set "${NAT_NETWORK}" "${NAT_PUBLIC}" target_address="${NAT_INTERNAL}" --project "${PROJECT_NAME}"
+  fi
+fi
+
 echo "Importing '${BACKUP_FILE}' as '${TARGET_NAME}' into project '${PROJECT_NAME}'..."
-run lxc import "${BACKUP_FILE}" "${TARGET_NAME}" --project "${PROJECT_NAME}"
+if ! incus import "${BACKUP_FILE}" "${TARGET_NAME}" --project "${PROJECT_NAME}"; then
+  if [[ "${NAT_FORWARD_CREATED}" == 'yes' ]]; then
+    incus network forward delete "${NAT_NETWORK}" "${NAT_PUBLIC}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
+  fi
+  fail "command failed: incus import ${BACKUP_FILE} ${TARGET_NAME} --project ${PROJECT_NAME}"
+fi
+[[ -z "${NAT_PUBLIC}" ]] || run incus config set "${TARGET_NAME}" "${PUBLIC_IP_CONFIG_KEY}=${NAT_PUBLIC}" --project "${PROJECT_NAME}"
 
 echo
 echo 'Restore complete.'
@@ -195,5 +259,7 @@ echo "Project  : ${PROJECT_NAME}"
 echo "Instance : ${TARGET_NAME}"
 echo
 echo "The instance was imported stopped. Start it with:"
-echo "  lxc start ${TARGET_NAME} --project ${PROJECT_NAME}"
-echo 'If the original instance had a network forward, recreate it manually with `lxc network forward create` once the restored instance has an address.'
+echo "  incus start ${TARGET_NAME} --project ${PROJECT_NAME}"
+if [[ -n "${NAT_PUBLIC}" ]]; then
+  echo "Its 1:1 NAT (${NAT_PUBLIC}) is in place. DNS records were not touched; run dns/sync-dns-records.sh if needed."
+fi

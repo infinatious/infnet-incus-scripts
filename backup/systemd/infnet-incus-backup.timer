@@ -1,5 +1,5 @@
 [Unit]
-Description=Run MicroCloud instance backup nightly
+Description=Run Incus instance backup nightly
 
 [Timer]
 OnCalendar=*-*-* 02:00:00

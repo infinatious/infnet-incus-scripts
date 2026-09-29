@@ -13,7 +13,7 @@ fail() {
 
 usage() {
   cat <<'EOF'
-Usage: create-instance.sh --project-id ID --environment ENV --service-code CODE --profile-type TYPE [--cpu N] [--ram GIB] [--disk GIB] [--image-index N] [--image-alias NAME] [--description-suffix TEXT]
+Usage: create-instance.sh --project-id ID --environment ENV --service-code CODE --profile-type TYPE [--cpu N] [--ram GIB] [--disk GIB] [--image-index N] [--image-alias NAME] [--public-ip IP] [--description-suffix TEXT]
 
 Options:
   --project-id ID          Numeric project ID to select the project.
@@ -25,6 +25,8 @@ Options:
   --disk GIB               Override boot disk size in GiB.
   --image-index N          Pick the desired image by the displayed list index.
   --image-alias NAME       Pick an image by exact alias name.
+  --public-ip IP           1:1 NAT public IPv4 to assign (default: first free
+                           address in the uplink's ipv4.routes).
   --description-suffix TEXT
                            Optional suffix appended to the generated description.
   --help                   Show this help message.
@@ -46,6 +48,7 @@ require_cmd() {
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
 DNS_LIB_FILE="${SCRIPT_DIR}/dns/technitium-dns.sh"
+NAT_LIB_FILE="${SCRIPT_DIR}/lib/public-ip.sh"
 
 [[ -f "${ENV_FILE}" ]] || fail "${ENV_FILE} not found."
 # shellcheck source=/dev/null
@@ -53,6 +56,9 @@ source "${ENV_FILE}"
 [[ -f "${DNS_LIB_FILE}" ]] || fail "${DNS_LIB_FILE} not found."
 # shellcheck source=/dev/null
 source "${DNS_LIB_FILE}"
+[[ -f "${NAT_LIB_FILE}" ]] || fail "${NAT_LIB_FILE} not found."
+# shellcheck source=/dev/null
+source "${NAT_LIB_FILE}"
 
 ARGS_PROVIDED=$#
 
@@ -65,6 +71,7 @@ RAM_ARG=''
 DISK_ARG=''
 IMAGE_INDEX_ARG=''
 IMAGE_ALIAS_ARG=''
+PUBLIC_IP_ARG=''
 DESCRIPTION_SUFFIX_ARG=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -113,6 +120,11 @@ while [[ $# -gt 0 ]]; do
       IMAGE_ALIAS_ARG="$2"
       shift 2
       ;;
+    --public-ip)
+      [[ $# -ge 2 ]] || fail 'missing value for --public-ip.'
+      PUBLIC_IP_ARG="$2"
+      shift 2
+      ;;
     --description-suffix)
       [[ $# -ge 2 ]] || fail 'missing value for --description-suffix.'
       DESCRIPTION_SUFFIX_ARG="$2"
@@ -128,18 +140,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-require_cmd lxc
+require_cmd incus
 require_cmd jq
 require_cmd python3
 require_cmd curl
 
 mapfile -t PROJECT_OPTIONS < <(
-  lxc project list --format csv 2>/dev/null | while IFS=',' read -r PROJECT_NAME _ _ _ _ _ _ PROJECT_DESCRIPTION _; do
-    [[ -n "${PROJECT_NAME}" ]] || continue
-    if [[ "${PROJECT_DESCRIPTION}" =~ ^Project[[:space:]]ID:[[:space:]]([0-9]+)$ ]]; then
-      printf '%s\t%s\n' "${BASH_REMATCH[1]}" "${PROJECT_NAME}"
-    fi
-  done
+  incus project list -f json 2>/dev/null \
+    | jq -r '.[] | select(.description | test("^Project ID: [0-9]+$")) | "\(.description | ltrimstr("Project ID: "))\t\(.name)"'
 )
 (( ${#PROJECT_OPTIONS[@]} > 0 )) || fail 'no projects with project ID metadata were found.'
 
@@ -193,14 +201,15 @@ case "${PROFILE_TYPE}" in
     ;;
 esac
 
-lxc project show "${PROJECT_NAME}" >/dev/null 2>&1 || fail "project '${PROJECT_NAME}' does not exist."
-lxc profile show "${PROFILE_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || fail "profile '${PROFILE_NAME}' does not exist in project '${PROJECT_NAME}'."
+incus project show "${PROJECT_NAME}" >/dev/null 2>&1 || fail "project '${PROJECT_NAME}' does not exist."
+incus profile show "${PROFILE_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || fail "profile '${PROFILE_NAME}' does not exist in project '${PROJECT_NAME}'."
 PROFILE_SHOW_FILE="$(mktemp)"
+DESC_FILE=''
 cleanup() {
   rm -f "${PROFILE_SHOW_FILE}" "${DESC_FILE}"
 }
 trap cleanup EXIT
-lxc profile show "${PROFILE_NAME}" --project "${PROJECT_NAME}" > "${PROFILE_SHOW_FILE}"
+incus profile show "${PROFILE_NAME}" --project "${PROJECT_NAME}" > "${PROFILE_SHOW_FILE}"
 
 PROFILE_CPU_CORES="$(python3 - "${PROFILE_SHOW_FILE}" <<'PY'
 import sys
@@ -262,13 +271,26 @@ DISK_GIB="${DISK_GIB:-${PROFILE_DISK_GIB}}"
 [[ "${RAM_GIB}" =~ ^[0-9]+$ ]] || fail 'RAM must be numeric GiB.'
 [[ "${DISK_GIB}" =~ ^[0-9]+$ ]] || fail 'boot disk size must be numeric GiB.'
 
-lxc network show "${NETWORK_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || fail "network '${NETWORK_NAME}' does not exist in project '${PROJECT_NAME}'."
+incus network show "${NETWORK_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || fail "network '${NETWORK_NAME}' does not exist in project '${PROJECT_NAME}'."
 
-NETWORK_IPV4_CIDR="$(lxc network get "${NETWORK_NAME}" ipv4.address --project "${PROJECT_NAME}" 2>/dev/null || true)"
+NETWORK_IPV4_CIDR="$(incus network get "${NETWORK_NAME}" ipv4.address --project "${PROJECT_NAME}" 2>/dev/null || true)"
 [[ -n "${NETWORK_IPV4_CIDR}" ]] || fail "network '${NETWORK_NAME}' does not have an ipv4.address configured."
 PROJECT_ID="$(awk -F '[./]' '{print $3}' <<< "${NETWORK_IPV4_CIDR}")"
 [[ "${PROJECT_ID}" =~ ^[0-9]+$ ]] || fail "unable to determine project ID from network subnet '${NETWORK_IPV4_CIDR}'."
 (( PROJECT_ID >= 1 && PROJECT_ID <= 255 )) || fail 'derived project ID must be between 1 and 255.'
+
+# Settle the 1:1 NAT public IP before launching so a bad address or an
+# exhausted range fails here instead of leaving an instance behind.
+nat_require_support || exit 1
+UPLINK_NAME="$(nat_network_uplink "${NETWORK_NAME}" "${PROJECT_NAME}")"
+[[ -n "${UPLINK_NAME}" && "${UPLINK_NAME}" != 'none' ]] || fail "network '${NETWORK_NAME}' has no uplink network, so it cannot use 1:1 NAT."
+if [[ -n "${PUBLIC_IP_ARG}" ]]; then
+  nat_validate_address "${UPLINK_NAME}" "${PUBLIC_IP_ARG}" || exit 1
+  PUBLIC_IPV4="${PUBLIC_IP_ARG}"
+else
+  PUBLIC_IPV4="$(nat_allocate_address "${UPLINK_NAME}")" || exit 1
+fi
+echo "Public IPv4 for 1:1 NAT: ${PUBLIC_IPV4} (uplink '${UPLINK_NAME}')."
 
 case "${ENV_CODE}" in
   p)
@@ -292,10 +314,10 @@ PROJECT_ID_STR="${PROJECT_ID}"
 
 case "${PROFILE_TYPE}" in
   linux|Linux|l)
-    mapfile -t IMAGE_ROWS < <(lxc image list --project default --format json | jq -r '.[] | select(((.aliases | map(.name // "") | join(" ")) | test("win"; "i")) | not) | [(.aliases[0].name // "-"), .fingerprint[0:12], .type, .architecture, (.description // "")] | @tsv')
+    mapfile -t IMAGE_ROWS < <(incus image list --project default --format json | jq -r '.[] | select(((.aliases | map(.name // "") | join(" ")) | test("win"; "i")) | not) | [(.aliases[0].name // "-"), .fingerprint[0:12], .type, .architecture, (.description // "")] | @tsv')
     ;;
   win|Windows|w)
-    mapfile -t IMAGE_ROWS < <(lxc image list --project default --format json | jq -r '.[] | select((.aliases | map(.name // "") | join(" ")) | test("win"; "i")) | [(.aliases[0].name // "-"), .fingerprint[0:12], .type, .architecture, (.description // "")] | @tsv')
+    mapfile -t IMAGE_ROWS < <(incus image list --project default --format json | jq -r '.[] | select((.aliases | map(.name // "") | join(" ")) | test("win"; "i")) | [(.aliases[0].name // "-"), .fingerprint[0:12], .type, .architecture, (.description // "")] | @tsv')
     ;;
   *)
     fail 'profile type must be linux or win.'
@@ -331,7 +353,7 @@ SELECTED_ROW="${IMAGE_ROWS[$((IMAGE_INDEX - 1))]}"
 SELECTED_ALIAS="$(awk -F '\t' '{print $1}' <<< "${SELECTED_ROW}")"
 SELECTED_FP12="$(awk -F '\t' '{print $2}' <<< "${SELECTED_ROW}")"
 SELECTED_TYPE="$(awk -F '\t' '{print $3}' <<< "${SELECTED_ROW}")"
-SELECTED_FP_FULL="$(lxc image list --project default --format json | jq -r --arg fp "${SELECTED_FP12}" '.[] | select(.fingerprint | startswith($fp)) | .fingerprint' | head -n1)"
+SELECTED_FP_FULL="$(incus image list --project default --format json | jq -r --arg fp "${SELECTED_FP12}" '.[] | select(.fingerprint | startswith($fp)) | .fingerprint' | head -n1)"
 [[ -n "${SELECTED_FP_FULL}" ]] || fail 'unable to resolve selected image fingerprint.'
 
 case "${SELECTED_TYPE}" in
@@ -341,7 +363,7 @@ case "${SELECTED_TYPE}" in
 esac
 
 NAME_PREFIX="${ENV_PREFIX}${PROJECT_ID_STR}-${SERVICE_CODE}-${INSTANCE_TYPE}"
-mapfile -t EXISTING_MATCHES < <(lxc list --project "${PROJECT_NAME}" --format csv -c n 2>/dev/null | grep -E "^${NAME_PREFIX}[0-9]{2}$" || true)
+mapfile -t EXISTING_MATCHES < <(incus list --project "${PROJECT_NAME}" --format csv -c n 2>/dev/null | grep -E "^${NAME_PREFIX}[0-9]{2}$" || true)
 NEXT_SEQ=1
 if (( ${#EXISTING_MATCHES[@]} > 0 )); then
   LAST_SEQ="$(printf '%s\n' "${EXISTING_MATCHES[@]}" | sed -E 's/.*([0-9]{2})$/\1/' | sort -n | tail -n1)"
@@ -357,26 +379,32 @@ fi
 LAUNCH_ARGS+=(-d root,size="${DISK_GIB}GiB")
 
 echo "Creating instance '${INSTANCE_NAME}' from image ${SELECTED_ALIAS} (${SELECTED_FP12})..."
-run lxc "${LAUNCH_ARGS[@]}"
+run incus "${LAUNCH_ARGS[@]}"
 
 echo 'Waiting for IPv4 address...'
+# The guest-reported address needs the incus-agent; VMs without it (e.g. a
+# fresh Windows install) never report one, so fall back to the address OVN
+# assigned to the NIC's port, matched by MAC.
+INSTANCE_HWADDR="$(incus config get "${INSTANCE_NAME}" "volatile.${PUBLIC_IP_NIC}.hwaddr" --project "${PROJECT_NAME}" 2>/dev/null || true)"
 INSTANCE_IPV4=''
 for _ in $(seq 1 60); do
-  INSTANCE_IPV4="$(lxc list "${INSTANCE_NAME}" --project "${PROJECT_NAME}" --format json | jq -r '.[0].state.network.eth0.addresses[]? | select(.family=="inet" and .scope=="global") | .address' | head -n1)"
-  if [[ -n "${INSTANCE_IPV4}" && "${INSTANCE_IPV4}" != 'null' ]]; then
-    break
+  INSTANCE_IPV4="$(incus query "/1.0/instances/${INSTANCE_NAME}/state?project=${PROJECT_NAME}" 2>/dev/null \
+    | jq -r --arg nic "${PUBLIC_IP_NIC}" '.network[$nic].addresses[]? | select(.family=="inet" and .scope=="global") | .address' | head -n1)"
+  if [[ -z "${INSTANCE_IPV4}" && -n "${INSTANCE_HWADDR}" ]]; then
+    INSTANCE_IPV4="$(incus network list-leases "${NETWORK_NAME}" --project "${PROJECT_NAME}" -f json 2>/dev/null \
+      | jq -r --arg mac "${INSTANCE_HWADDR}" '.[] | select((.hwaddr | ascii_downcase) == ($mac | ascii_downcase)) | .address | select(test("^[0-9.]+$"))' | head -n1)"
   fi
+  [[ -n "${INSTANCE_IPV4}" ]] && break
   sleep 2
 done
-[[ -n "${INSTANCE_IPV4}" && "${INSTANCE_IPV4}" != 'null' ]] || fail 'unable to determine instance IPv4 address after waiting.'
+[[ -n "${INSTANCE_IPV4}" ]] || fail "unable to determine the IPv4 address of '${INSTANCE_NAME}' after waiting; no 1:1 NAT was created."
 
-echo "Creating network forward on '${NETWORK_NAME}' to ${INSTANCE_IPV4}..."
-run lxc network forward create "${NETWORK_NAME}" --project "${PROJECT_NAME}" --allocate=ipv4 target_address="${INSTANCE_IPV4}"
-LISTEN_IPV4="$(lxc network forward list "${NETWORK_NAME}" --project "${PROJECT_NAME}" --format json | jq -r --arg target "${INSTANCE_IPV4}" '.[] | select(.config.target_address == $target) | .listen_address' | tail -n1)"
-[[ -n "${LISTEN_IPV4}" && "${LISTEN_IPV4}" != 'null' ]] || fail 'unable to determine allocated forward listen IPv4 address.'
+echo "Mapping public ${PUBLIC_IPV4} 1:1 to ${INSTANCE_IPV4} on '${NETWORK_NAME}'..."
+nat_attach "${INSTANCE_NAME}" "${PROJECT_NAME}" "${NETWORK_NAME}" "${PUBLIC_IPV4}" "${INSTANCE_IPV4}" \
+  || fail "unable to create the 1:1 NAT for '${INSTANCE_NAME}'. The instance exists without a public IP."
 
 DNS_FQDN="${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}"
-dns_register_record "${DNS_FQDN}" "${LISTEN_IPV4}" || true
+dns_register_record "${DNS_FQDN}" "${PUBLIC_IPV4}" || true
 
 if [[ -n "${DESCRIPTION_SUFFIX_ARG}" ]]; then
   DESCRIPTION_SUFFIX="${DESCRIPTION_SUFFIX_ARG}"
@@ -385,12 +413,12 @@ elif (( ARGS_PROVIDED == 0 )); then
 else
   DESCRIPTION_SUFFIX=''
 fi
-DESCRIPTION_TEXT="${LISTEN_IPV4} ${SELECTED_ALIAS}"
+DESCRIPTION_TEXT="${PUBLIC_IPV4} ${SELECTED_ALIAS}"
 if [[ -n "${DESCRIPTION_SUFFIX}" ]]; then
   DESCRIPTION_TEXT="${DESCRIPTION_TEXT} ${DESCRIPTION_SUFFIX}"
 fi
 DESC_FILE="$(mktemp)"
-lxc config show "${INSTANCE_NAME}" --project "${PROJECT_NAME}" > "${DESC_FILE}"
+incus config show "${INSTANCE_NAME}" --project "${PROJECT_NAME}" > "${DESC_FILE}"
 python3 - "${DESC_FILE}" "${DESCRIPTION_TEXT}" <<'PY'
 import sys
 import yaml
@@ -402,8 +430,7 @@ data['description'] = desc
 with open(path, 'w') as f:
     yaml.safe_dump(data, f, sort_keys=False)
 PY
-bash -c 'lxc config edit "$1" --project "$2" < "$3"' _ "${INSTANCE_NAME}" "${PROJECT_NAME}" "${DESC_FILE}" || fail "unable to update description field for '${INSTANCE_NAME}'."
-run lxc config set "${INSTANCE_NAME}" user.network_forward_ipv4="${LISTEN_IPV4}" --project "${PROJECT_NAME}"
+bash -c 'incus config edit "$1" --project "$2" < "$3"' _ "${INSTANCE_NAME}" "${PROJECT_NAME}" "${DESC_FILE}" || fail "unable to update description field for '${INSTANCE_NAME}'."
 
 echo
 echo 'Instance creation complete.'
@@ -418,8 +445,8 @@ echo "CPU         : ${CPU_CORES}"
 echo "RAM         : ${RAM_GIB}GiB"
 echo "Boot disk   : ${DISK_GIB}GiB"
 echo "Instance IP : ${INSTANCE_IPV4}"
-echo "Forward IP  : ${LISTEN_IPV4}"
+echo "Public IP   : ${PUBLIC_IPV4} (1:1 NAT)"
 echo "Description : ${DESCRIPTION_TEXT}"
 if technitium_configured; then
-  echo "DNS         : ${DNS_FQDN} -> ${LISTEN_IPV4}"
+  echo "DNS         : ${DNS_FQDN} -> ${PUBLIC_IPV4}"
 fi

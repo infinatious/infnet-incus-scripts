@@ -20,13 +20,12 @@ usage() {
   cat <<'EOF'
 Usage: sync-dns-records.sh [--dry-run]
 
-Walks every instance in every project that has a stored forward IP
-(user.network_forward_ipv4) and makes sure a matching A record exists in
-Technitium for <instance-name>.<zone>. Missing records are created and
-records pointing at a stale IP are corrected; records that already match
-are left untouched. Instances without a forward IP are skipped. Run this
-against the whole cluster from any one node - it is not per-member like
-backup-instances.sh.
+Walks every instance in every project that has a 1:1 NAT public IP
+(user.public_ipv4) and makes sure a matching A record exists in Technitium
+for <instance-name>.<zone>. Missing records are created and records pointing
+at a stale IP are corrected; records that already match are left untouched.
+Instances without a public IP are skipped. On a cluster, run this from any
+one member - it covers every member, unlike backup-instances.sh.
 
 Options:
   --dry-run   Report what would change without writing to Technitium.
@@ -62,13 +61,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-require_cmd lxc
+require_cmd incus
 require_cmd jq
 require_cmd curl
 
 technitium_configured || fail 'Technitium is not configured in .env (TECHNITIUM_URL, TECHNITIUM_API_TOKEN, TECHNITIUM_ZONE).'
 
-mapfile -t PROJECT_NAMES < <(lxc project list --format csv 2>/dev/null | cut -d',' -f1 || true)
+mapfile -t PROJECT_NAMES < <(incus project list -f json 2>/dev/null | jq -r '.[].name' || true)
 (( ${#PROJECT_NAMES[@]} > 0 )) || fail 'no projects found.'
 
 CREATED=0
@@ -79,14 +78,14 @@ SKIPPED=0
 for PROJECT_NAME in "${PROJECT_NAMES[@]}"; do
   [[ -n "${PROJECT_NAME}" ]] || continue
 
-  mapfile -t INSTANCE_NAMES < <(lxc list --project "${PROJECT_NAME}" -c n -f csv 2>/dev/null || true)
+  mapfile -t INSTANCE_NAMES < <(incus list --project "${PROJECT_NAME}" -c n -f csv 2>/dev/null || true)
   (( ${#INSTANCE_NAMES[@]} > 0 )) || continue
 
   for INSTANCE_NAME in "${INSTANCE_NAMES[@]}"; do
     [[ -n "${INSTANCE_NAME}" ]] || continue
 
-    FORWARD_IP="$(lxc config get "${INSTANCE_NAME}" user.network_forward_ipv4 --project "${PROJECT_NAME}" 2>/dev/null || true)"
-    if [[ -z "${FORWARD_IP}" ]]; then
+    PUBLIC_IP="$(incus config get "${INSTANCE_NAME}" user.public_ipv4 --project "${PROJECT_NAME}" 2>/dev/null || true)"
+    if [[ -z "${PUBLIC_IP}" ]]; then
       SKIPPED=$((SKIPPED + 1))
       continue
     fi
@@ -94,29 +93,29 @@ for PROJECT_NAME in "${PROJECT_NAMES[@]}"; do
     FQDN="${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}"
     EXISTING_IP="$(dns_lookup_record_ip "${FQDN}" || true)"
 
-    if [[ "${EXISTING_IP}" == "${FORWARD_IP}" ]]; then
-      echo "OK       '${FQDN}' -> '${FORWARD_IP}' (project '${PROJECT_NAME}')."
+    if [[ "${EXISTING_IP}" == "${PUBLIC_IP}" ]]; then
+      echo "OK       '${FQDN}' -> '${PUBLIC_IP}' (project '${PROJECT_NAME}')."
       UNCHANGED=$((UNCHANGED + 1))
       continue
     fi
 
     if [[ -n "${EXISTING_IP}" ]]; then
-      echo "Drifted  '${FQDN}': '${EXISTING_IP}' -> '${FORWARD_IP}' (project '${PROJECT_NAME}')."
+      echo "Drifted  '${FQDN}': '${EXISTING_IP}' -> '${PUBLIC_IP}' (project '${PROJECT_NAME}')."
       UPDATED=$((UPDATED + 1))
     else
-      echo "Missing  '${FQDN}' -> '${FORWARD_IP}' (project '${PROJECT_NAME}')."
+      echo "Missing  '${FQDN}' -> '${PUBLIC_IP}' (project '${PROJECT_NAME}')."
       CREATED=$((CREATED + 1))
     fi
 
     if [[ "${DRY_RUN}" != 'yes' ]]; then
-      dns_register_record "${FQDN}" "${FORWARD_IP}" || true
+      dns_register_record "${FQDN}" "${PUBLIC_IP}" || true
     fi
   done
 done
 
 echo
 if [[ "${DRY_RUN}" == 'yes' ]]; then
-  echo "Dry run complete. Would create ${CREATED}, update ${UPDATED}; ${UNCHANGED} already correct, ${SKIPPED} skipped (no forward IP)."
+  echo "Dry run complete. Would create ${CREATED}, update ${UPDATED}; ${UNCHANGED} already correct, ${SKIPPED} skipped (no public IP)."
 else
-  echo "Sync complete. Created ${CREATED}, updated ${UPDATED}; ${UNCHANGED} already correct, ${SKIPPED} skipped (no forward IP)."
+  echo "Sync complete. Created ${CREATED}, updated ${UPDATED}; ${UNCHANGED} already correct, ${SKIPPED} skipped (no public IP)."
 fi

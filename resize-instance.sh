@@ -84,16 +84,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-require_cmd lxc
+require_cmd incus
 require_cmd python3
 
 mapfile -t PROJECT_OPTIONS < <(
-  lxc project list --format csv 2>/dev/null | while IFS=',' read -r PROJECT_NAME _ _ _ _ _ _ PROJECT_DESCRIPTION _; do
-    [[ -n "${PROJECT_NAME}" ]] || continue
-    if [[ "${PROJECT_DESCRIPTION}" =~ ^Project[[:space:]]ID:[[:space:]]([0-9]+)$ ]]; then
-      printf '%s\t%s\n' "${BASH_REMATCH[1]}" "${PROJECT_NAME}"
-    fi
-  done
+  incus project list -f json 2>/dev/null \
+    | jq -r '.[] | select(.description | test("^Project ID: [0-9]+$")) | "\(.description | ltrimstr("Project ID: "))\t\(.name)"'
 )
 (( ${#PROJECT_OPTIONS[@]} > 0 )) || fail 'no projects with project ID metadata were found.'
 
@@ -111,9 +107,9 @@ fi
 PROJECT_NAME="$(awk -F '\t' -v pid="${SELECTED_PROJECT_ID}" '$1 == pid {print $2}' <<< "$(printf '%s\n' "${PROJECT_OPTIONS[@]}")")"
 [[ -n "${PROJECT_NAME}" ]] || fail "project ID '${SELECTED_PROJECT_ID}' is not available."
 
-lxc project show "${PROJECT_NAME}" >/dev/null 2>&1 || fail "project '${PROJECT_NAME}' does not exist."
+incus project show "${PROJECT_NAME}" >/dev/null 2>&1 || fail "project '${PROJECT_NAME}' does not exist."
 
-mapfile -t INSTANCE_ROWS < <(lxc list --project "${PROJECT_NAME}" -c nds4t -f csv 2>/dev/null || true)
+mapfile -t INSTANCE_ROWS < <(incus list --project "${PROJECT_NAME}" -c nds4t -f csv 2>/dev/null || true)
 (( ${#INSTANCE_ROWS[@]} > 0 )) || fail "no instances found in project '${PROJECT_NAME}'."
 
 echo 'Instances:'
@@ -133,10 +129,10 @@ fi
 SELECTED_ROW="${INSTANCE_ROWS[$((INSTANCE_INDEX - 1))]}"
 IFS=',' read -r INSTANCE_NAME INSTANCE_DESCRIPTION INSTANCE_STATE INSTANCE_IPV4 INSTANCE_TYPE_DISPLAY <<< "${SELECTED_ROW}"
 
-CURRENT_CPU="$(lxc config get "${INSTANCE_NAME}" limits.cpu --project "${PROJECT_NAME}" 2>/dev/null || true)"
-CURRENT_RAM="$(lxc config get "${INSTANCE_NAME}" limits.memory --project "${PROJECT_NAME}" 2>/dev/null || true)"
-CURRENT_BOOT="$(lxc config device get "${INSTANCE_NAME}" root size --project "${PROJECT_NAME}" 2>/dev/null || true)"
-FORWARD_IP="$(lxc config get "${INSTANCE_NAME}" user.network_forward_ipv4 --project "${PROJECT_NAME}" 2>/dev/null || true)"
+CURRENT_CPU="$(incus config get "${INSTANCE_NAME}" limits.cpu --project "${PROJECT_NAME}" 2>/dev/null || true)"
+CURRENT_RAM="$(incus config get "${INSTANCE_NAME}" limits.memory --project "${PROJECT_NAME}" 2>/dev/null || true)"
+CURRENT_BOOT="$(incus config device get "${INSTANCE_NAME}" root size --project "${PROJECT_NAME}" 2>/dev/null || true)"
+PUBLIC_IP="$(incus config get "${INSTANCE_NAME}" user.public_ipv4 --project "${PROJECT_NAME}" 2>/dev/null || true)"
 
 [[ -n "${CURRENT_CPU}" ]] || CURRENT_CPU='inherited'
 [[ -n "${CURRENT_RAM}" ]] || CURRENT_RAM='inherited'
@@ -164,7 +160,7 @@ echo "Current CPU   : ${CURRENT_CPU}"
 echo "Current RAM   : ${CURRENT_RAM}"
 echo "Current Boot  : ${CURRENT_BOOT}"
 echo "Instance IP   : ${INSTANCE_IPV4:--}"
-echo "Forward IP    : ${FORWARD_IP:--}"
+echo "Public IP     : ${PUBLIC_IP:--}"
 echo "Description   : ${INSTANCE_DESCRIPTION:--}"
 echo
 
@@ -229,31 +225,31 @@ if [[ "${CURRENT_BOOT}" != "${NEW_BOOT}" && ${WAS_RUNNING} -eq 1 ]]; then
   read -r -p "Instance '${INSTANCE_NAME}' is running and must be stopped for boot disk changes. Stop it now? Type yes to stop, anything else to abort: " STOP_CONFIRM
   [[ "${STOP_CONFIRM}" == 'yes' ]] || fail 'resize cancelled because the instance must be powered off for boot disk changes.'
   echo "Stopping instance '${INSTANCE_NAME}' for root disk resize..."
-  run lxc stop "${INSTANCE_NAME}" --project "${PROJECT_NAME}"
+  run incus stop "${INSTANCE_NAME}" --project "${PROJECT_NAME}"
   RESTART_NEEDED=1
 elif [[ "${CURRENT_BOOT}" != "${NEW_BOOT}" ]]; then
   echo "Instance '${INSTANCE_NAME}' is already stopped for boot disk resize."
 fi
 
 echo "Updating CPU to ${NEW_CPU}..."
-run lxc config set "${INSTANCE_NAME}" limits.cpu "${NEW_CPU}" --project "${PROJECT_NAME}"
+run incus config set "${INSTANCE_NAME}" limits.cpu "${NEW_CPU}" --project "${PROJECT_NAME}"
 
 echo "Updating RAM to ${NEW_RAM}..."
-run lxc config set "${INSTANCE_NAME}" limits.memory "${NEW_RAM}" --project "${PROJECT_NAME}"
+run incus config set "${INSTANCE_NAME}" limits.memory "${NEW_RAM}" --project "${PROJECT_NAME}"
 
 echo "Updating root disk size to ${NEW_BOOT}..."
-if lxc config device show "${INSTANCE_NAME}" --project "${PROJECT_NAME}" 2>/dev/null | grep -q '^root:'; then
-  run lxc config device set "${INSTANCE_NAME}" root size="${NEW_BOOT}" --project "${PROJECT_NAME}"
+if incus config device show "${INSTANCE_NAME}" --project "${PROJECT_NAME}" 2>/dev/null | grep -q '^root:'; then
+  run incus config device set "${INSTANCE_NAME}" root size="${NEW_BOOT}" --project "${PROJECT_NAME}"
 else
-  run lxc config device override "${INSTANCE_NAME}" root size="${NEW_BOOT}" --project "${PROJECT_NAME}"
+  run incus config device override "${INSTANCE_NAME}" root size="${NEW_BOOT}" --project "${PROJECT_NAME}"
 fi
 
 if (( RESTART_NEEDED == 1 )); then
   echo "Starting instance '${INSTANCE_NAME}'..."
-  run lxc start "${INSTANCE_NAME}" --project "${PROJECT_NAME}"
+  run incus start "${INSTANCE_NAME}" --project "${PROJECT_NAME}"
 fi
 
-UPDATED_IPV4="$(lxc list "${INSTANCE_NAME}" --project "${PROJECT_NAME}" -c 4 -f csv 2>/dev/null | head -n1 || true)"
+UPDATED_IPV4="$(incus list "${INSTANCE_NAME}" --project "${PROJECT_NAME}" -c 4 -f csv 2>/dev/null | head -n1 || true)"
 [[ -n "${UPDATED_IPV4}" ]] || UPDATED_IPV4="${INSTANCE_IPV4}"
 
 echo
@@ -264,6 +260,6 @@ echo "CPU          : ${NEW_CPU}"
 echo "RAM          : ${NEW_RAM}"
 echo "Boot disk    : ${NEW_BOOT}"
 echo "Instance IP  : ${UPDATED_IPV4:--}"
-echo "Forward IP   : ${FORWARD_IP:--}"
+echo "Public IP    : ${PUBLIC_IP:--}"
 echo "Description  : ${INSTANCE_DESCRIPTION:--}"
 

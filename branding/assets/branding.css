@@ -1,0 +1,57 @@
+/* Infinatious Cloud branding for the Incus web UI.
+   Installed into <ui>/assets/infnet/ and linked from index.html by
+   apply-ui-branding.sh; paths below are relative to that directory. */
+
+@font-face {
+  font-family: "Special Gothic";
+  font-style: normal;
+  font-weight: 400 700;
+  font-stretch: 75% 125%;
+  src: url("fonts/special-gothic.ttf") format("truetype-variations"),
+       url("fonts/special-gothic.ttf") format("truetype");
+}
+
+/* The UI sets every text face to "Ubuntu variable". Redefining that family
+   here, after the UI's own @font-face rules, makes the browser resolve it to
+   Special Gothic everywhere without editing the hashed bundles. The italic
+   face is mapped too (Special Gothic has no italic) so italics don't fall
+   back to Ubuntu. "Ubuntu Mono variable" is left alone, so the terminal and
+   code editors keep a monospace face. */
+@font-face {
+  font-family: "Ubuntu variable";
+  font-style: normal;
+  font-weight: 100 800;
+  font-stretch: 100%;
+  src: url("fonts/special-gothic.ttf") format("truetype-variations"),
+       url("fonts/special-gothic.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "Ubuntu variable";
+  font-style: italic;
+  font-weight: 100 800;
+  font-stretch: 100%;
+  src: url("fonts/special-gothic.ttf") format("truetype-variations"),
+       url("fonts/special-gothic.ttf") format("truetype");
+}
+
+/* Sidebar logo: the mark (on its own dark badge, so it reads on both the
+   light and dark themes) replaces incus-logo.svg; the "Incus UI" label next
+   to it is hidden and replaced with the product name. */
+.p-panel__logo .p-panel__logo-image {
+  height: 32px;
+  margin-top: 4px;
+}
+
+.p-panel__logo .logo-text {
+  font-size: 0;
+  white-space: nowrap;
+}
+
+.p-panel__logo .logo-text::after {
+  content: "Infinatious Cloud";
+  font-family: "Special Gothic", sans-serif;
+  font-size: 1.25rem;
+  font-weight: 600;
+  line-height: 2.25rem;
+}

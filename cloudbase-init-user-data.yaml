@@ -1,6 +1,6 @@
 #cloud-config
 # Windows cloudbase-init bootstrap payload
-# This payload is attached to the Windows LXD profile via the cloud-init.user-data config key.
+# This payload is attached to the Windows Incus profile via the cloud-init.user-data config key.
 # It can be expanded later with Windows-specific userdata, packages, or post-boot commands.
 
 users:

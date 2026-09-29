@@ -46,6 +46,9 @@ source "${ENV_FILE}"
 [[ -f "${DNS_LIB_FILE}" ]] || fail "${DNS_LIB_FILE} not found."
 # shellcheck source=/dev/null
 source "${DNS_LIB_FILE}"
+[[ -f "${SCRIPT_DIR}/lib/public-ip.sh" ]] || fail "${SCRIPT_DIR}/lib/public-ip.sh not found."
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/public-ip.sh"
 
 PROJECT_ID_ARG=''
 INSTANCE_INDEX_ARG=''
@@ -82,17 +85,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-require_cmd lxc
+require_cmd incus
 require_cmd jq
 require_cmd curl
 
 mapfile -t PROJECT_OPTIONS < <(
-  lxc project list --format csv 2>/dev/null | while IFS=',' read -r PROJECT_NAME _ _ _ _ _ _ PROJECT_DESCRIPTION _; do
-    [[ -n "${PROJECT_NAME}" ]] || continue
-    if [[ "${PROJECT_DESCRIPTION}" =~ ^Project[[:space:]]ID:[[:space:]]([0-9]+)$ ]]; then
-      printf '%s\t%s\n' "${BASH_REMATCH[1]}" "${PROJECT_NAME}"
-    fi
-  done
+  incus project list -f json 2>/dev/null \
+    | jq -r '.[] | select(.description | test("^Project ID: [0-9]+$")) | "\(.description | ltrimstr("Project ID: "))\t\(.name)"'
 )
 (( ${#PROJECT_OPTIONS[@]} > 0 )) || fail 'no projects with project ID metadata were found.'
 
@@ -111,9 +110,9 @@ PROJECT_NAME="$(awk -F '\t' -v pid="${SELECTED_PROJECT_ID}" '$1 == pid {print $2
 [[ -n "${PROJECT_NAME}" ]] || fail "project ID '${SELECTED_PROJECT_ID}' is not available."
 NETWORK_NAME="${PROJECT_NAME}"
 
-lxc project show "${PROJECT_NAME}" >/dev/null 2>&1 || fail "project '${PROJECT_NAME}' does not exist."
+incus project show "${PROJECT_NAME}" >/dev/null 2>&1 || fail "project '${PROJECT_NAME}' does not exist."
 
-mapfile -t INSTANCE_ROWS < <(lxc list --project "${PROJECT_NAME}" -c nds4 -f csv 2>/dev/null || true)
+mapfile -t INSTANCE_ROWS < <(incus list --project "${PROJECT_NAME}" -c nds4 -f csv 2>/dev/null || true)
 (( ${#INSTANCE_ROWS[@]} > 0 )) || fail "no instances found in project '${PROJECT_NAME}'."
 
 echo 'Instances:'
@@ -146,7 +145,7 @@ else
 fi
 
 IFS=',' read -r INSTANCE_NAME INSTANCE_DESCRIPTION INSTANCE_STATE INSTANCE_IPV4 <<< "${SELECTED_ROW}"
-FORWARD_IP="$(lxc config get "${INSTANCE_NAME}" user.network_forward_ipv4 --project "${PROJECT_NAME}" 2>/dev/null || true)"
+PUBLIC_IP="$(nat_instance_address "${INSTANCE_NAME}" "${PROJECT_NAME}")"
 
 echo
 echo 'Selected instance:'
@@ -154,8 +153,8 @@ echo "Name        : ${INSTANCE_NAME}"
 echo "State       : ${INSTANCE_STATE:--}"
 echo "IPv4        : ${INSTANCE_IPV4:--}"
 echo "Description : ${INSTANCE_DESCRIPTION:--}"
-if [[ -n "${FORWARD_IP}" ]]; then
-  echo "Forward IP  : ${FORWARD_IP}"
+if [[ -n "${PUBLIC_IP}" ]]; then
+  echo "Public IP   : ${PUBLIC_IP} (1:1 NAT)"
 fi
 
 if [[ -n "${CONFIRM_ARG}" ]]; then
@@ -166,23 +165,23 @@ fi
 [[ "${CONFIRM}" == 'yes' ]] || fail 'deletion cancelled.'
 
 echo "Stopping instance '${INSTANCE_NAME}'..."
-lxc stop "${INSTANCE_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
+incus stop "${INSTANCE_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
 
 echo "Deleting instance '${INSTANCE_NAME}'..."
-run lxc delete "${INSTANCE_NAME}" --project "${PROJECT_NAME}"
+run incus delete "${INSTANCE_NAME}" --project "${PROJECT_NAME}"
 
-if [[ -n "${FORWARD_IP}" ]]; then
-  echo "Deleting forward '${FORWARD_IP}' on network '${NETWORK_NAME}'..."
-  run lxc network forward delete "${NETWORK_NAME}" "${FORWARD_IP}" --project "${PROJECT_NAME}"
-  dns_deregister_record "${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}" "${FORWARD_IP}" || true
+if [[ -n "${PUBLIC_IP}" ]]; then
+  echo "Releasing public IP '${PUBLIC_IP}' (network forward on '${NETWORK_NAME}')..."
+  run nat_release "${PROJECT_NAME}" "${NETWORK_NAME}" "${PUBLIC_IP}"
+  dns_deregister_record "${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}" "${PUBLIC_IP}" || true
 else
-  echo "No stored forward IP found on instance '${INSTANCE_NAME}', skipping forward deletion."
+  echo "No public IP found on instance '${INSTANCE_NAME}', skipping 1:1 NAT cleanup."
 fi
 
 echo
 echo 'Deletion complete.'
 echo "Project    : ${PROJECT_NAME}"
 echo "Instance   : ${INSTANCE_NAME}"
-if [[ -n "${FORWARD_IP}" ]]; then
-  echo "Forward IP : ${FORWARD_IP}"
+if [[ -n "${PUBLIC_IP}" ]]; then
+  echo "Public IP  : ${PUBLIC_IP} (released)"
 fi

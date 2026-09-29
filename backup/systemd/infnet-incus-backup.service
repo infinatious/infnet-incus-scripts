@@ -1,0 +1,10 @@
+[Unit]
+Description=Incus instance backup to NFS
+After=network-online.target remote-fs.target incus.service
+Wants=network-online.target remote-fs.target
+ConditionPathIsMountPoint=/mnt/incus-backups
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/infnet-incus-scripts/backup
+ExecStart=/opt/infnet-incus-scripts/backup/backup-instances.sh

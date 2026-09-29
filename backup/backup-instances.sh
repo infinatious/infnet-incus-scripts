@@ -33,11 +33,11 @@ that, only the newest backup in each ~30-day window survives, up to a total
 age of --retention-months months from today (monthly tier). Anything older
 than that total window is deleted outright.
 
-By default only instances located on the cluster member this lxc client talks
-to are backed up, so the script can run unattended and identically on every
-node (e.g. from microcloud-backup.timer). From a machine outside the cluster
-(such as the MicroCloud Vault VM) use --all-members to back up every instance
-through the LXD API.
+On a standalone Incus server every instance is backed up. On a cluster, by
+default only instances located on the member this incus client talks to are
+backed up, so the script can run unattended and identically on every member
+(e.g. from infnet-incus-backup.timer). From a machine outside the cluster use
+--all-members to back up every instance through the Incus API.
 
 Every non-dry run writes a JSON run record to <NFS_BACKUP_DIR>/.runs/ and a
 <backup>.tar.gz.json metadata sidecar next to each backup.
@@ -180,16 +180,24 @@ MONTHLY_TOTAL_DAYS=$(( RETENTION_MONTHS * 30 ))
 [[ -n "${ALL_MEMBERS}" && -n "${MEMBER_FILTER}" ]] && fail '--all-members and --member are mutually exclusive.'
 (( ${#BACKUP_DESCRIPTION} <= 500 )) || fail 'description must be 500 characters or fewer.'
 
-require_cmd lxc
+require_cmd incus
 require_cmd jq
 
 mountpoint -q "${NFS_BACKUP_DIR}" || fail "'${NFS_BACKUP_DIR}' is not a mounted filesystem. Refusing to write backups to local disk."
 
-ENDPOINT_MEMBER="$(lxc query /1.0 2>/dev/null | jq -r '.environment.server_name // empty')"
-[[ -n "${ENDPOINT_MEMBER}" ]] || fail 'unable to determine cluster member name via lxc query /1.0.'
+SERVER_INFO="$(incus query /1.0 2>/dev/null)"
+ENDPOINT_MEMBER="$(jq -r '.environment.server_name // empty' <<< "${SERVER_INFO}")"
+[[ -n "${ENDPOINT_MEMBER}" ]] || fail 'unable to determine the server name via incus query /1.0.'
+SERVER_CLUSTERED="$(jq -r '.environment.server_clustered // false' <<< "${SERVER_INFO}")"
 RUNNER="${BACKUP_RUNNER_NAME:-$(hostname -s 2>/dev/null || hostname)}"
 
-if [[ -n "${ALL_MEMBERS}" ]]; then
+if [[ "${SERVER_CLUSTERED}" != 'true' ]]; then
+  # Standalone servers don't record a member location on instances, so member
+  # filtering would skip everything; every instance is local here.
+  [[ -n "${MEMBER_FILTER}" ]] && fail "--member only applies to clustered servers; '${ENDPOINT_MEMBER}' is standalone."
+  TARGET_MEMBER=''
+  SCOPE_LABEL="server '${ENDPOINT_MEMBER}'"
+elif [[ -n "${ALL_MEMBERS}" ]]; then
   TARGET_MEMBER=''
   SCOPE_LABEL='all cluster members'
 else
@@ -357,10 +365,10 @@ else
 fi
 
 if [[ -n "${PROJECT_FILTER}" ]]; then
-  lxc project show "${PROJECT_FILTER}" >/dev/null 2>&1 || fail "project '${PROJECT_FILTER}' does not exist."
+  incus project show "${PROJECT_FILTER}" >/dev/null 2>&1 || fail "project '${PROJECT_FILTER}' does not exist."
   PROJECT_NAMES=("${PROJECT_FILTER}")
 else
-  mapfile -t PROJECT_NAMES < <(lxc project list --format csv 2>/dev/null | cut -d',' -f1 | sed 's/ (current)$//' || true)
+  mapfile -t PROJECT_NAMES < <(incus project list -f json 2>/dev/null | jq -r '.[].name' || true)
 fi
 (( ${#PROJECT_NAMES[@]} > 0 )) || fail 'no projects found.'
 
@@ -368,12 +376,14 @@ MATCHED=0
 for PROJECT_NAME in "${PROJECT_NAMES[@]}"; do
   [[ -n "${PROJECT_NAME}" ]] || continue
 
-  mapfile -t INSTANCE_ROWS < <(lxc list --project "${PROJECT_NAME}" -c nLt -f csv 2>/dev/null || true)
+  mapfile -t INSTANCE_ROWS < <(incus list --project "${PROJECT_NAME}" -f json 2>/dev/null \
+    | jq -r '.[] | [.name, (.location // ""), .type] | @tsv' || true)
   (( ${#INSTANCE_ROWS[@]} > 0 )) || continue
 
   for INSTANCE_ROW in "${INSTANCE_ROWS[@]}"; do
     [[ -n "${INSTANCE_ROW}" ]] || continue
-    IFS=',' read -r INSTANCE_NAME INSTANCE_LOCATION INSTANCE_TYPE <<< "${INSTANCE_ROW}"
+    IFS=$'\t' read -r INSTANCE_NAME INSTANCE_LOCATION INSTANCE_TYPE <<< "${INSTANCE_ROW}"
+    [[ "${SERVER_CLUSTERED}" == 'true' ]] || INSTANCE_LOCATION="${ENDPOINT_MEMBER}"
     [[ -z "${INSTANCE_FILTER}" || "${INSTANCE_NAME}" == "${INSTANCE_FILTER}" ]] || continue
     if [[ -n "${TARGET_MEMBER}" && "${INSTANCE_LOCATION}" != "${TARGET_MEMBER}" ]]; then
       [[ -n "${INSTANCE_FILTER}" ]] && echo "Skipping '${INSTANCE_NAME}': located on '${INSTANCE_LOCATION}', not '${TARGET_MEMBER}'."
@@ -393,16 +403,17 @@ for PROJECT_NAME in "${PROJECT_NAMES[@]}"; do
       # Export to a .partial name and rename on success, so an interrupted or
       # failed export never looks like a restorable backup.
       CURRENT_PARTIAL="${BACKUP_FILE}.partial"
-      # --optimized-storage does a ZFS snapshot diff, but on VMs it walks both
-      # the instance's config dataset and its .block dataset and miscounts
-      # their identically-named snapshots, failing with "Snapshot ... in
-      # storage but not expected" even when storage and LXD's DB agree (see
+      # --optimized-storage does a ZFS snapshot diff, but on VMs LXD walked
+      # both the instance's config dataset and its .block dataset and
+      # miscounted their identically-named snapshots, failing with "Snapshot
+      # ... in storage but not expected" (see
       # https://discuss.linuxcontainers.org/t/lxc-export-snapshot-in-storage-but-not-expected/11756).
-      # Containers only have one dataset and aren't affected, so keep the
-      # faster optimized path for them.
+      # Incus shares that storage code, so VMs keep the plain export until
+      # the optimized path is proven on Incus. Containers only have one
+      # dataset and aren't affected.
       EXPORT_OPTS=(--project "${PROJECT_NAME}" --compression gzip)
-      [[ "${INSTANCE_TYPE}" == 'VIRTUAL-MACHINE' || "${INSTANCE_TYPE}" == 'virtual-machine' ]] || EXPORT_OPTS+=(--optimized-storage)
-      if lxc export "${INSTANCE_NAME}" "${CURRENT_PARTIAL}" "${EXPORT_OPTS[@]}" 2> "${WORK_DIR}/export.err" \
+      [[ "${INSTANCE_TYPE}" == 'virtual-machine' ]] || EXPORT_OPTS+=(--optimized-storage)
+      if incus export "${INSTANCE_NAME}" "${CURRENT_PARTIAL}" "${EXPORT_OPTS[@]}" 2> "${WORK_DIR}/export.err" \
          && mv -f -- "${CURRENT_PARTIAL}" "${BACKUP_FILE}"; then
         CURRENT_PARTIAL=''
         write_metadata "${BACKUP_FILE}" "${PROJECT_NAME}" "${INSTANCE_NAME}" "${INSTANCE_LOCATION}"
@@ -410,7 +421,7 @@ for PROJECT_NAME in "${PROJECT_NAMES[@]}"; do
         BACKED_UP=$((BACKED_UP + 1))
       else
         EXPORT_ERR="$(tr '\n' ' ' < "${WORK_DIR}/export.err" | sed 's/[[:space:]]*$//')"
-        echo "Error: backup of '${INSTANCE_NAME}' (project '${PROJECT_NAME}') failed: ${EXPORT_ERR:-lxc export failed}" >&2
+        echo "Error: backup of '${INSTANCE_NAME}' (project '${PROJECT_NAME}') failed: ${EXPORT_ERR:-incus export failed}" >&2
         rm -f -- "${CURRENT_PARTIAL}"
         CURRENT_PARTIAL=''
         jq -cn --arg p "${PROJECT_NAME}" --arg i "${INSTANCE_NAME}" --arg m "${INSTANCE_LOCATION}" --arg e "${EXPORT_ERR}" \

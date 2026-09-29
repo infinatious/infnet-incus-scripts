@@ -28,4 +28,4 @@ packages:
 
 runcmd:
   - [systemctl, enable, --now, qemu-guest-agent]
-  - sudo bash -c "curl -sSL https://raw.githubusercontent.com/infinatious/microcloud-maintenance/refs/heads/main/post-install.sh | bash"
+  - sudo bash -c "curl -sSL https://raw.githubusercontent.com/infinatious/infnet-incus-scripts/refs/heads/main/post-install.sh | bash"

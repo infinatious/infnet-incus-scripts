@@ -6,14 +6,14 @@ PS1_VALUE='\[\e[38;5;140m\][\[\e[38;5;206m\]\t\[\e[0m\] \[\e[38;5;76m\]\u@\[\e[3
 if [[ -d /home/kauffpc ]]; then
   BASHRC_FILE="/home/kauffpc/.bashrc"
   PROFILE_FILE="/home/kauffpc/.profile"
-  if ! grep -q 'MICROCLOUD_CUSTOM_PS1' "${BASHRC_FILE}" 2>/dev/null; then
+  if ! grep -q 'INFNET_CUSTOM_PS1' "${BASHRC_FILE}" 2>/dev/null; then
     cat <<'EOF' >> "${BASHRC_FILE}"
-# MICROCLOUD_CUSTOM_PS1
+# INFNET_CUSTOM_PS1
 PS1='\[\e[38;5;140m\][\[\e[38;5;206m\]\t\[\e[0m\] \[\e[38;5;76m\]\u@\[\e[38;5;36;1m\]\h\[\e[0m\] \[\e[38;5;39m\]\w\[\e[38;5;141m\]]\[\e[0m\] '
 EOF
   fi
-  if ! grep -q 'MICROCLOUD_CUSTOM_PS1' "${PROFILE_FILE}" 2>/dev/null; then
-    printf '%s\n' '# MICROCLOUD_CUSTOM_PS1' "PS1='${PS1_VALUE}'" >> "${PROFILE_FILE}"
+  if ! grep -q 'INFNET_CUSTOM_PS1' "${PROFILE_FILE}" 2>/dev/null; then
+    printf '%s\n' '# INFNET_CUSTOM_PS1' "PS1='${PS1_VALUE}'" >> "${PROFILE_FILE}"
   fi
   chown kauffpc:kauffpc "${BASHRC_FILE}" "${PROFILE_FILE}"
 fi
@@ -135,13 +135,13 @@ rm -f "${MOTD_TMP}"
 EOF
 chmod 755 /etc/profile.d/motd-refresh.sh
 
-cat <<'EOF' > /etc/update-motd.d/99-microcloud-motd
+cat <<'EOF' > /etc/update-motd.d/99-infnet-motd
 #!/usr/bin/env bash
 if [[ -f /etc/profile.d/motd-refresh.sh ]]; then
   . /etc/profile.d/motd-refresh.sh
 fi
 EOF
-chmod 755 /etc/update-motd.d/99-microcloud-motd
+chmod 755 /etc/update-motd.d/99-infnet-motd
 
 if [[ -f /etc/profile ]]; then
   grep -q 'motd-refresh.sh' /etc/profile || echo '. /etc/profile.d/motd-refresh.sh' >> /etc/profile

@@ -1,311 +1,375 @@
-# MicroCloud maintenance workflow
+# INFNET Incus scripts
 
-## Fresh MicroCloud install setup
+Project-based workflow for a standalone (or clustered) [Incus](https://linuxcontainers.org/incus/) host: every project gets its own OVN network and Linux/Windows profiles, every instance gets a public IPv4 through 1:1 NAT, a Technitium DNS record, and nightly backups to NFS.
 
-Before using the scripts in this repository, set up a fresh MicroCloud host with a working LXD environment and a storage pool named `zpool`.
+This repository replaces `microcloud-maintenance`. It targets Incus from the [Zabbly packages](https://github.com/zabbly/incus), with a local OVN control plane in place of MicroOVN.
 
-### 1. Install the base tooling
-
-On the MicroCloud host, ensure the following are available:
-
-- `lxc`
-- `lxd`
-- `bash`
-- `jq`
-- `python3`
-- `curl`
-
-The scripts in this repository assume that:
-
-- the host has an available storage pool named `zpool` (can be changed in deploy-project.sh)
-- an uplink physical network named `UPLINK-NAT` already exists (can be changed in deploy-project.sh)
-- the `default` project is available for image discovery
-
-### 2. Create the network uplink
-
-Create a physical uplink network for the host that will act as the external-facing network for OVN traffic. The network should be configured as a physical network on the host NIC that will carry your traffic upstream.
-
-In practice, that means:
-
-- pick the host physical interface that should connect to the external network
-- create a physical network object named `UPLINK-NAT`
-- set the network to use that interface
-- configure DNS servers for the uplink
-- configure a gateway and the correct IPv4 routes for the upstream network
-- reserve the OVN IPv4 address range that the project networks should use for NAT and routing
-
-The important idea is that `UPLINK-NAT` should represent a real physical uplink path, not an isolated bridge or a private virtual network.
-
-A typical configuration pattern looks like this conceptually, using an uplink network of 172.31.232.0/21:
-
-```yaml
-access_entitlements:
-  - can_edit
-  - can_delete
-project: default
-name: UPLINK-NAT
-description: ''
-type: physical
-config:
-  dns.nameservers: 1.1.1.1,9.9.9.9
-  ipv4.gateway: 172.31.232.1/21
-  ipv4.routes: 172.31.233.0/24,172.31.234.0/24,172.31.235.0/24,172.31.236.0/24, 172.31.237.0/24, 172.31.238.0/24, 172.31.239.0/24, 172.31.232.128/25
-  ipv4.ovn.ranges: 172.31.232.2-172.31.232.127
-```
-
-Use values that match your site network planning. The exact address block should be chosen to fit the external network that the host is attached to.
-
-### 3. Confirm the storage pool
-
-Create or confirm the storage pool named `zpool` before running the deployment scripts.
-
-This repository expects the root disk for profiles and instances to come from that storage pool.
-
-### 4. Validate the environment
-
-Once the host is ready, verify that:
-
-- `lxc network show UPLINK-NAT` succeeds
-- `lxc storage show zpool` succeeds
-- `lxc image list --project default` returns images that can be used for instance creation
+- [Host setup](#host-setup)
+- [1:1 NAT](#11-nat)
+- [Authentik SSO](#authentik-sso)
+- [Web UI branding](#web-ui-branding)
+- [Scripts](#scripts)
+- [DNS registration](#dns-registration)
+- [Backups](#backups)
 
 ---
 
-## Script overview
+## Host setup
 
-These scripts are intended for a project-based workflow on a MicroCloud host.
+`host/setup-incus-host.sh` turns a clean Ubuntu 26.04 (or 24.04 / Debian 12-13) host into the environment the scripts expect. It is safe to re-run: each step checks what is already in place.
 
-- `deploy-project.sh` creates a project, network, and Linux/Windows profiles.
-- `create-instance.sh` creates instances inside the selected project using the chosen profile and image set.
-- `resize-instance.sh` resizes an existing instance in the selected project.
-- `delete-instance.sh` removes a single instance.
-- `delete-project.sh` deletes all profiles in a project, removes the network, and destroys the project.
-- `backup/backup-instances.sh` exports every instance running on the local cluster member to NFS storage. Intended to run from `microcloud-backup.timer` on every node.
-- `backup/restore-instance.sh` restores an instance from a backup written by `backup-instances.sh`.
-- `dns/technitium-dns.sh` is a shared helper, sourced (not run directly) by `create-instance.sh`, `delete-instance.sh`, `delete-project.sh`, and `sync-dns-records.sh` to manage DNS records in Technitium.
-- `dns/sync-dns-records.sh` audits every instance across the whole cluster and creates or corrects any missing/stale Technitium DNS record.
+### 1. Deploy the repository and fill in `.env`
 
-`.env` stays at the repository root and is shared by every script, including those in `dns/` and `backup/`.
+```bash
+sudo git clone https://github.com/infinatious/infnet-incus-scripts.git /opt/infnet-incus-scripts
+sudo chown -R "$USER": /opt/infnet-incus-scripts
+cd /opt/infnet-incus-scripts
+cp .env.example .env
+```
 
-### Command-line usage
+Edit the **Host bootstrap** and **Authentik OIDC** sections of `.env`:
 
-All of the scripts now accept command-line arguments and keep the original prompt-driven flow as an interactive fallback when you omit the matching arguments.
+| Variable | Meaning |
+|---|---|
+| `INCUS_CHANNEL` | Zabbly channel: `stable` or `lts-7.0` - 1:1 NAT needs Incus 7.3+ or a 7.0 LTS release after 7.0.1 (see [1:1 NAT](#11-nat)) |
+| `INCUS_ADMIN_USER` | User added to `incus-admin` so it can run `incus` without sudo |
+| `STORAGE_DEVICE` | Whole disk for the `zpool` ZFS pool, as a `/dev/disk/by-id/` path |
+| `OVN_ENCAP_IP` | This host's management IP, used as the OVN Geneve tunnel endpoint |
+| `UPLINK_PARENT` | NIC wired to the public network (no IP configured on it) |
+| `UPLINK_IPV4_GATEWAY` | Upstream gateway with prefix, e.g. `172.31.232.1/21` |
+| `UPLINK_IPV4_OVN_RANGES` | Addresses the OVN routers take for their own uplink ports (one per project network, used for shared outbound NAT) |
+| `UPLINK_IPV4_ROUTES` | Public addresses handed out for 1:1 NAT - must not overlap `UPLINK_IPV4_OVN_RANGES` |
+| `UPLINK_DNS_NAMESERVERS` | DNS servers handed to instances |
+| `NFS_BACKUP_SOURCE` | NFS export mounted at `NFS_BACKUP_DIR` for backups |
+| `OIDC_*` | See [Authentik SSO](#authentik-sso); leave `OIDC_CLIENT_ID` empty to skip |
+
+### 2. Run it
+
+```bash
+sudo ./host/setup-incus-host.sh
+```
+
+If the storage disk still carries an old pool (for example the MicroCloud `local`/`zpool` pool), the script stops and lists the signatures it found. Re-run with `--wipe-storage-device` to erase them - this destroys everything on that disk.
+
+### What it does
+
+These are the exact commands, in order, if you'd rather run them by hand. Values in `<>` come from `.env`.
+
+```bash
+# Zabbly repository (verify the key fingerprint is 4EFC 5906 96CB 15B8 7C73 A3AD 82CC 8797 C838 DCFD)
+curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --show-keys --fingerprint
+sudo mkdir -p /etc/apt/keyrings
+sudo curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+sudo tee /etc/apt/sources.list.d/zabbly-incus.sources <<EOF
+Enabled: yes
+Types: deb
+URIs: https://pkgs.zabbly.com/incus/<INCUS_CHANNEL>
+Suites: $(. /etc/os-release && echo "${VERSION_CODENAME}")
+Components: main
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/zabbly.asc
+EOF
+
+# Packages: Incus, its web UI, incus-extra (distrobuilder, incus-migrate), ZFS, and a local OVN
+sudo apt-get update
+sudo apt-get install -y incus incus-ui-canonical incus-extra zfsutils-linux ovn-central ovn-host \
+  nfs-common jq curl python3 python3-yaml
+
+# Local OVN control plane (Incus talks to unix:/run/ovn/ovnnb_db.sock by default)
+sudo systemctl enable --now ovn-central ovn-host
+sudo ovs-vsctl set open_vswitch . \
+  external_ids:ovn-remote=unix:/run/ovn/ovnsb_db.sock \
+  external_ids:ovn-encap-type=geneve \
+  external_ids:ovn-encap-ip=<OVN_ENCAP_IP>
+
+sudo usermod -aG incus-admin <INCUS_ADMIN_USER>
+
+# Initialize Incus
+cat <<EOF | sudo incus admin init --preseed
+config:
+  core.https_address: '[::]:8443'
+networks:
+- name: <UPLINK_NETWORK>
+  type: physical
+  config:
+    parent: <UPLINK_PARENT>
+    ipv4.gateway: <UPLINK_IPV4_GATEWAY>
+    ipv4.ovn.ranges: <UPLINK_IPV4_OVN_RANGES>
+    ipv4.routes: <UPLINK_IPV4_ROUTES>
+    dns.nameservers: <UPLINK_DNS_NAMESERVERS>
+- name: default
+  type: ovn
+  config:
+    network: <UPLINK_NETWORK>
+    ipv4.address: <IPV4_SUBNET_PREFIX>.0.1/24
+    ipv4.nat: 'true'
+    ipv6.address: none
+storage_pools:
+- name: <STORAGE_POOL>
+  driver: zfs
+  config:
+    source: <STORAGE_DEVICE>
+profiles:
+- name: default
+  devices:
+    root: {path: /, pool: <STORAGE_POOL>, type: disk}
+    eth0: {name: eth0, network: default, type: nic}
+EOF
+```
+
+It then mounts the NFS backup export, installs the backup timer (only when the repository lives at `/opt/infnet-incus-scripts`, the path the units use), applies the OIDC settings, and brands the web UI.
+
+The `default` project's OVN network uses `<IPV4_SUBNET_PREFIX>.0.0/24`, so project ID `0` is reserved for it.
+
+### Validate
+
+```bash
+incus network show UPLINK --project default
+incus storage show zpool
+incus image list images: ubuntu/26.04 --format csv -c lt | head   # remote image server reachable
+```
+
+Images the scripts can deploy must be in the `default` project (project networks are created with `features.images=false`):
+
+```bash
+incus image copy images:ubuntu/26.04/cloud local: --alias ubuntu2604 --vm
+incus image list -c lFtd
+```
+
+Windows images: `distrobuilder repack-windows` (from `incus-extra`) injects the VirtIO drivers into a Windows ISO, the same job `lxd-imagebuilder repack-windows` did.
+
+---
+
+## 1:1 NAT
+
+Every instance gets one public IPv4 that maps to it in both directions. Incus builds this from two halves:
+
+| Direction | Mechanism | Command the scripts run |
+|---|---|---|
+| Inbound | A **network forward** on the project's OVN network, listening on the public IP, with the instance as default target (every port and protocol) | `incus network forward create <network> <public-ip> target_address=<internal-ip> --project <project>` |
+| Outbound | **`ipv4.address.external`** on the instance NIC, which adds a per-NIC SNAT rule so its traffic leaves from that same public IP instead of the network's shared address | `incus config device override <instance> eth0 ipv4.address=<internal-ip> ipv4.address.external=<public-ip> --project <project>` |
+
+Constraints the scripts enforce:
+
+- **Incus 7.3+ (or a 7.0 LTS release after 7.0.1).** Earlier versions implement a default-target forward as a portless OVN load balancer that collides with the NIC's SNAT rule: it drops the SYN-ACK of every connection the instance opens itself, so outbound TCP hangs while ping and inbound traffic still work. Fixed upstream in commit `42053c457d` ("Fix NAT for network forward default targets"), which uses a plain `dnat` rule instead. Verified on inf-93148 with Incus 7.0.1. `create-instance.sh` refuses older versions.
+- **The forward must exist first.** Incus rejects `ipv4.address.external` unless the address is already a network forward on the NIC's network (it is validated against the forward table), so the NIC setting can't replace the forward - both are needed.
+- **Public IPs come from the uplink's `ipv4.routes`.** Forward listen addresses must fall inside those routes. `ipv4.ovn.ranges` doesn't qualify: it is reserved for the OVN routers' own uplink addresses. `create-instance.sh` refuses to run if the uplink has no `ipv4.routes`.
+- **Incus has no `--allocate` for forwards** (that was an LXD feature), so `lib/public-ip.sh` picks addresses itself: the first address in `ipv4.routes` that isn't the gateway, the uplink subnet's network/broadcast address, or already used by any forward, load balancer or OVN router on that uplink in any project.
+- **The server needs the `network_ovn_external_nic_address` API extension**, which every version new enough for the fix above has. `create-instance.sh` checks for it.
+- **`eth0` comes from the profile**, so the NIC settings are applied with `incus config device override`, which copies the profile device onto the instance. `config device set` only works once the instance has its own copy.
+- **The internal address is pinned** (`ipv4.address`) to the address OVN handed out at boot, so the forward target stays valid across restarts. The NIC is re-plugged once at creation to apply it.
+
+The public IP is also recorded in the instance's `user.public_ipv4` config key, which `delete-instance.sh`, `delete-project.sh` and `sync-dns-records.sh` read.
+
+On a physical uplink, OVN answers ARP for the forward addresses itself (`ovn.ingress_mode=l2proxy`, the default), so the routes can be a slice of the uplink's own subnet without any upstream routing changes.
+
+---
+
+## Authentik SSO
+
+Incus accepts Authentik logins for both the web UI and the CLI.
+
+### What Incus requires of the provider
+
+Taken from the Incus source (`internal/server/auth/oidc`):
+
+- **Public client, PKCE.** Incus has no client-secret setting; the web UI login uses the authorization code flow with PKCE and an empty secret.
+- **Device code flow** for the CLI (`incus remote add ... --auth-type=oidc`).
+- **Redirect URI:** `https://<the host name the browser used>/oidc/callback`.
+- **Signed JWT access tokens.** Incus verifies the *access token* (issuer, signature against the provider's JWKS, expiry, and audience if `oidc.audience` is set). The username is its `email` claim, falling back to `sub`.
+- **Tokens live in cookies** (`oidc_access`, `oidc_refresh`, `oidc_id`), each limited to ~4 KB by browsers.
+- **Every authenticated user gets full admin.** OpenFGA is the only authorization method Incus supports alongside OIDC, and without it any user who can log in controls the server. **Restrict who can log in on the Authentik side.**
+
+### Authentik provider and application
+
+Create a new OAuth2/OpenID provider and application (e.g. slug `incus-us-west`); the old `lxd-us-west` app is confidential and can't be reused as-is.
+
+| Setting | Value |
+|---|---|
+| Client type | **Public** |
+| Redirect URIs | Strict: `https://us-west.infinatio.us/oidc/callback` (add `https://inf-93148.phxaz.infinatio.us:8443/oidc/callback` if you also use the direct address) |
+| Signing key | Any RSA certificate, e.g. `authentik Self-signed Certificate` (required, so tokens are RS256-signed and verifiable via JWKS) |
+| Scopes | `openid`, `email`, `offline_access`, and a **profile mapping without groups** (reuse `LXD OAuth Mapping: profile (no groups)`) - the default `profile` mapping includes every group and pushes the token cookies past 4 KB, the same failure LXD hit |
+| Include claims in id_token | On |
+| Subject mode | Based on the user's email (makes `sub` match the username Incus shows) |
+| Access token validity | e.g. `minutes=10`; refresh token e.g. `days=30` |
+
+Then:
+
+- **Application > Policy / Group / User Bindings:** bind the admin group only, so nobody else can obtain a token.
+- **Device code flow** (for the CLI): create a flow with designation *Stage Configuration* and authentication *Require authentication*, then select it under **System > Brands > (your brand) > Default code flow**. Authentik only offers the device flow on brands that have one configured, so without it `incus remote add --auth-type=oidc` fails.
+- Copy the **Client ID**.
+
+### Incus server settings
+
+```bash
+incus config set oidc.issuer="https://auth.infinatio.us/application/o/incus-us-west/"
+incus config set oidc.client.id="<AUTHENTIK_CLIENT_ID>"
+incus config set oidc.scopes="openid,offline_access,email,profile"
+incus config set oidc.audience="<AUTHENTIK_CLIENT_ID>"   # optional: reject tokens minted for other apps
+```
+
+(Incus uses `oidc.*` keys; there are no `openid.*` keys.) `setup-incus-host.sh` runs these from the `OIDC_*` values in `.env`, after checking that the issuer's discovery document is reachable from the host - on VLAN 29 that needs the firewall rule to NPM.
+
+### Logging in
+
+- **Web UI:** `https://us-west.infinatio.us/ui/` > *Login with SSO*.
+- **CLI:** `incus remote add us-west https://us-west.infinatio.us --auth-type=oidc`, then open the printed URL and confirm the device code.
+
+---
+
+## Web UI branding
+
+The web UI is the `incus-ui-canonical` package: static files in **`/opt/incus/ui/`**, served by `incusd` because Zabbly's `incusd` wrapper exports `INCUS_UI=/opt/incus/ui/`. Nothing about its appearance is configurable, but the files are plain assets on disk, so `branding/apply-ui-branding.sh` edits them:
+
+| Change | How |
+|---|---|
+| Font: Special Gothic | Copies `branding/assets/fonts/special-gothic.ttf` and `branding.css` into `/opt/incus/ui/assets/infnet/` and links the stylesheet from `index.html`. The stylesheet redefines the UI's `Ubuntu variable` font family to point at Special Gothic, so every text face changes without touching the hashed JS/CSS bundles. `Ubuntu Mono` is left alone for the terminal and code editors. |
+| Logo | Replaces `/opt/incus/ui/assets/img/incus-logo.svg` (the path is hardcoded in the UI bundle) with `branding/assets/logo.svg`: the Infinatious mark on a dark badge, so it reads on both the light and dark themes. |
+| Name | The stylesheet hides the "Incus UI" label beside the logo and shows "Infinatious Cloud" in its place. |
+| Favicon | Replaces `/opt/incus/ui/assets/img/favicon-32x32.png` with `branding/assets/favicon-32x32.png`. |
+| Page titles | `<title>` in `index.html`, and the `<page> \| Incus UI` tab-title literal in the main JS bundle, become `Infinatious Cloud`. If a future release changes that literal the script warns and leaves titles alone. |
+
+### Applying it
+
+```bash
+sudo /opt/infnet-incus-scripts/branding/apply-ui-branding.sh --install-hook
+```
+
+Reload the UI with a hard refresh. `setup-incus-host.sh` already runs this.
+
+**Package upgrades restore the stock files.** `--install-hook` adds `/etc/apt/apt.conf.d/99-infnet-incus-ui-branding`, which re-runs the script after every `dpkg` run, so an `apt upgrade` is rebranded automatically. The script is idempotent.
+
+### Changing the assets
+
+Replace the files in `branding/assets/` and re-run the script:
+
+- `logo.svg` - shown 32 px tall; keep a `viewBox` so it scales instead of cropping.
+- `favicon-32x32.png` - optional; e.g. `magick -background none -density 72 logo.svg -resize 32x32 favicon-32x32.png`.
+- `fonts/special-gothic.ttf` - Special Gothic variable font (weights 400-700, widths 75-125%).
+- `branding.css` - the product name lives in the `content:` of `.p-panel__logo .logo-text::after`.
+
+To undo: `sudo rm /etc/apt/apt.conf.d/99-infnet-incus-ui-branding && sudo apt-get install --reinstall incus-ui-canonical`.
+
+---
+
+## Scripts
+
+- `deploy-project.sh` creates a project, its OVN network, and Linux/Windows profiles.
+- `create-instance.sh` creates an instance from the chosen profile and image, and maps a public IP to it with 1:1 NAT.
+- `resize-instance.sh` changes CPU, RAM and root disk size.
+- `delete-instance.sh` deletes an instance and releases its public IP and DNS record.
+- `delete-project.sh` deletes a project's profiles, network and the project itself (and optionally its instances).
+- `backup/backup-instances.sh` exports instances to NFS. Runs nightly from `infnet-incus-backup.timer`.
+- `backup/restore-instance.sh` restores an instance, including its 1:1 NAT.
+- `dns/sync-dns-records.sh` creates or corrects the Technitium record of every instance.
+- `lib/public-ip.sh` and `dns/technitium-dns.sh` are shared helpers, sourced by the scripts above.
+- `host/setup-incus-host.sh` builds the host ([Host setup](#host-setup)); `branding/apply-ui-branding.sh` brands the UI.
+
+`.env` stays at the repository root and is shared by every script. All scripts accept command-line arguments and fall back to interactive prompts for anything omitted.
 
 #### `deploy-project.sh`
-
-Create a new project, OVN network, and both profiles.
-
-Examples:
 
 ```bash
 ./deploy-project.sh --project-name demo --project-id 42
 ```
 
-If you omit the options, the script will prompt for them in the original interactive way.
+Creates the project (description `Project ID: 42`, which the other scripts use to find it), an OVN network `demo` on `<IPV4_SUBNET_PREFIX>.42.1/24` behind `UPLINK_NETWORK`, and the profiles `demo-linux` (1 CPU, 2 GiB, 20 GiB, cloud-init from `cloud-init-user-data.yaml`) and `demo-win` (2 CPU, 4 GiB, 64 GiB, cloudbase-init from `cloudbase-init-user-data.yaml`). It warns if the uplink has no `ipv4.routes`, since instances in the project couldn't get public IPs.
 
 #### `create-instance.sh`
 
-Create a new instance inside an existing project.
-
-Examples:
-
 ```bash
 ./create-instance.sh --project-id 42 --environment d --service-code tstng --profile-type linux --image-alias ubuntu2604 --cpu 1 --ram 2 --disk 20 --description-suffix 'site-a'
+./create-instance.sh --project-id 42 --environment p --service-code dnsag --profile-type linux --image-alias ubuntu2604 --public-ip 172.31.232.140
 ```
 
-Supported arguments:
-
 - `--project-id` selects the target project by numeric project ID.
-- `--environment` uses `p`, `t`, `q`, or `d`. (Prod, Test, QA, Dev)
+- `--environment` uses `p`, `t`, `q`, or `d` (Prod, Test, QA, Dev).
 - `--service-code` must be exactly five alphanumeric characters.
 - `--profile-type` is `linux` or `win`.
 - `--cpu`, `--ram`, and `--disk` override the profile defaults.
-- `--image-index` selects the image from the numbered filtered list.
-- `--image-alias` can be supplied instead of `--image-index` when you know the exact alias.
-- `--description-suffix` appends an optional text suffix to the instance description.
+- `--image-index` selects the image from the numbered filtered list; `--image-alias` selects it by exact alias.
+- `--public-ip` picks the 1:1 NAT address; by default the first free address in the uplink's `ipv4.routes` is used. Either way it is checked before the instance is created.
+- `--description-suffix` appends text to the instance description. It is only prompted for when the script is run with no arguments at all.
 
-If you omit any of these positional choices, the script will prompt for the missing values. The description suffix is the one exception: it's only prompted for when the script is run with *no* arguments at all. As soon as any argument is passed, an omitted `--description-suffix` is treated as empty rather than prompted for, since it's a genuinely optional field and a scripted invocation shouldn't block on stdin for it.
+The instance is named `<env prefix><project id>-<service code>-<ct|vs><nn>` (e.g. `pd20-dnsag-ct01`). Once it has an address the script creates the [1:1 NAT](#11-nat), registers `<instance-name>.<zone>` in Technitium (if configured), and sets the description to `<public ip> <image alias> [suffix]`.
 
-If Technitium is configured in `.env` (see [DNS registration](#dns-registration)), the script also registers `<instance-name>.<zone>` pointing at the instance's forward IP.
+The internal address is read from the guest (needs the `incus-agent` in VMs) or, failing that, from the address OVN assigned to the NIC - so VMs without the agent, such as a fresh Windows install, still work.
 
 #### `resize-instance.sh`
-
-Resize an existing instance in a project.
-
-Examples:
 
 ```bash
 ./resize-instance.sh --project-id 42 --instance-index 1 --cpu 4 --ram 8 --boot-disk 60 --yes
 ```
 
-Supported arguments:
-
-- `--project-id` selects the project by numeric project ID.
-- `--instance-index` selects the instance from the numbered list shown by the script.
-- `--cpu`, `--ram`, and `--boot-disk` set the new values.
-- `--yes` skips the final confirmation prompt.
-
-If you omit the selection or resource values, the script will prompt for them interactively.
+Growing the root disk of a running instance stops and restarts it (after confirmation). Shrinking is refused.
 
 #### `delete-instance.sh`
-
-Delete a single instance safely.
-
-Examples:
 
 ```bash
 ./delete-instance.sh --project-id 42 --instance-name p42-tstng-ct01 --yes
 ```
 
-Supported arguments:
-
-- `--project-id` selects the source project by numeric project ID.
-- `--instance-index` selects the instance from the numbered list.
-- `--instance-name` deletes the instance directly by exact LXD instance name.
-- `--yes` skips the final confirmation prompt.
-
-If Technitium is configured in `.env`, the script also removes the instance's `<instance-name>.<zone>` record.
+`--instance-index` selects from the numbered list instead of `--instance-name`. After the instance is deleted, its network forward (the inbound half of the NAT) is deleted and its DNS record removed.
 
 #### `delete-project.sh`
-
-Delete all profiles, remove the OVN network, and remove an entire project.
-
-Examples:
 
 ```bash
 ./delete-project.sh --project-id 42
 ./delete-project.sh --project-id 42 --delete-instances
 ```
 
-Supported arguments:
-
-- `--project-id` selects the project by numeric project ID.
-- `--delete-instances` stops and deletes every instance in the project before the project itself is removed.
-- `--yes` skips the confirmation prompt for the instance cleanup. Probably shouldn't use this.
-
-When `--delete-instances` is used and Technitium is configured in `.env`, each deleted instance's DNS record is removed alongside its network forward.
-
-A normal delete run will refuse to proceed if the project still contains instances unless you pass `--delete-instances`.
+Refuses to run while the project has instances unless `--delete-instances` is given, which deletes each one as `delete-instance.sh` does. `--yes` skips that confirmation.
 
 #### `sync-dns-records.sh`
-
-Audit every instance in every project (across the whole cluster, not just the local node) and create or correct its Technitium A record.
-
-Examples:
 
 ```bash
 ./dns/sync-dns-records.sh --dry-run
 ./dns/sync-dns-records.sh
 ```
 
-Supported arguments:
-
-- `--dry-run` reports what would be created or corrected without writing to Technitium.
-
-Instances without a stored forward IP are skipped. Existing records that already match are left alone. Use this to backfill DNS for instances created before this feature existed, or to recover after a Technitium outage caused a `create-instance.sh` registration to fail.
+Audits every instance in every project and creates or corrects its Technitium A record so it points at the instance's public IP. Instances without a public IP are skipped.
 
 #### `backup-instances.sh`
 
-Export instances to the NFS backup directory, then prune backups on a tiered retention schedule (see [Backup layout and retention](#backup-layout-and-retention)). By default it covers the instances on the cluster member the `lxc` client talks to (the local node when run on a host). From outside the cluster, for example the [MicroCloud Vault](https://github.com/infinatious/microcloud-backup-manager) VM, it can back up every member through the LXD API.
-
-Examples:
-
 ```bash
 ./backup/backup-instances.sh
-./backup/backup-instances.sh --retention-days 14
 ./backup/backup-instances.sh --dry-run
-./backup/backup-instances.sh --project p42-testing --instance p42-tstng-ct01 --tag adhoc --description 'before upgrade' --no-prune
-./backup/backup-instances.sh --all-members                   # every instance in the cluster
-./backup/backup-instances.sh --member mc-node2 --dry-run     # only instances on mc-node2
+./backup/backup-instances.sh --project infra-dns --instance pd20-dnsag-ct01 --tag adhoc --description 'before upgrade' --no-prune
 ```
 
-Supported arguments:
-
-- `--retention-days` overrides `BACKUP_RETENTION_DAYS` from `.env` for this run (length of the daily tier).
-- `--weekly-weeks` overrides `BACKUP_WEEKLY_RETENTION_WEEKS` (number of weekly buckets after the daily tier).
-- `--retention-months` overrides `BACKUP_RETENTION_MONTHS` (total age, in months, after which a backup is deleted outright).
-- `--all-members` backs up instances on every cluster member, not just the one the client talks to.
-- `--member` backs up only instances located on the named member (can't be combined with `--all-members`).
-- `--project` limits the run to one project.
-- `--instance` limits the run to one instance, which must be within the member scope above. The run fails if it isn't found.
-- `--tag` appends a tag to the file name (`<instance>_<timestamp>_<tag>.tar.gz`), e.g. `adhoc` for manual backups.
-- `--description` stores a free-text note in the backup's `.json` metadata sidecar.
-- `--requested-by` records who asked for the run, in the sidecar and the run record.
-- `--no-prune` skips retention pruning for this run (backups and run records).
-- `--dry-run` prints what would be backed up and pruned without doing it.
-
-This script takes no interactive input and is meant to run unattended from `microcloud-backup.timer`. See [Backups](#backups) below for setup.
+- `--retention-days`, `--weekly-weeks`, `--retention-months` override the [retention tiers](#backup-layout-and-retention) for this run.
+- `--project` / `--instance` narrow the run; the run fails if the named instance isn't found.
+- `--tag` appends a tag to the file name (`<instance>_<timestamp>_<tag>.tar.gz`).
+- `--description` and `--requested-by` are recorded in the metadata sidecar and run record.
+- `--no-prune` skips retention pruning; `--dry-run` only reports.
+- On a **cluster**, only instances on the member the client talks to are backed up by default; `--all-members` covers every member and `--member NAME` one specific member. On a **standalone** server every instance is backed up and `--member` is rejected.
 
 #### `restore-instance.sh`
 
-Restore an instance from a backup written by `backup-instances.sh`.
-
-Examples:
-
 ```bash
 ./backup/restore-instance.sh --project-id 42 --instance-name p42-tstng-ct01
-./backup/restore-instance.sh --project-id 42 --instance-name p42-tstng-ct01 --backup-index 1 --new-name p42-tstng-ct02 --yes
+./backup/restore-instance.sh --project-id 42 --instance-name p42-tstng-ct01 --backup-index 1 --yes
 ```
 
-Supported arguments:
+- `--backup-index` picks from the numbered list (newest first); `--backup-file` restores an exact tarball.
+- `--new-name` restores under a different name.
 
-- `--project-id` selects the project the backup belongs to, by numeric project ID.
-- `--instance-name` is the original instance name; used to locate its backups.
-- `--backup-index` selects a backup from the numbered list (newest first).
-- `--backup-file` restores an exact tarball path instead of browsing.
-- `--new-name` restores under a different instance name (default: original name).
-- `--yes` skips the confirmation prompt.
-
-If you omit the project, instance, or backup selection, the script will prompt for them interactively. The script refuses to overwrite an existing instance with the same name - use `--new-name` or delete the existing instance first. The restored instance is imported stopped; start it manually once you've verified it. If the original instance had a network forward, recreate it with `lxc network forward create` after the restore.
-
-### Deployment flow
-
-1. Run `deploy-project.sh` with `--project-name` and `--project-id`, or let it prompt if you omit them.
-2. The script creates:
-   - the project
-   - the OVN network for the project
-   - the Linux profile
-   - the Windows profile
-3. The Linux profile uses the cloud-init payload from `cloud-init-user-data.yaml`.
-4. The Windows profile is created without cloud-init and uses a larger boot disk size.
-
-### Instance creation flow
-
-1. Run `create-instance.sh` with the required argument set, or let it prompt for the missing values.
-2. The script selects the project, environment, and service code.
-3. It chooses either the Linux or Windows profile.
-4. It applies the chosen CPU, RAM, and disk values.
-5. It selects an image from the filtered list shown for the chosen profile family.
-6. The script creates the instance, allocates a forward IP, and stores the created description text.
-
-### Resize flow
-
-1. Run `resize-instance.sh` and let it prompt interactively.
-2. The existing description is preserved as-is.
-3. If the new boot disk is larger while the instance is running, the script will stop and restart it automatically.
-
-### Project deletion flow
-
-1. Run `delete-project.sh` with `--project-id`, or let it prompt if you omit it.
-2. The script removes every profile in the project first.
-3. It then removes the project network.
-4. Finally, it deletes the project itself.
+The restored instance is imported stopped. If the backup had a public IP, the network forward for it is recreated first (Incus won't import a NIC whose `ipv4.address.external` has no forward) and removed again if the import fails. Because the NAT identity travels with the instance, the restore is refused while another instance still owns that public IP: delete the original first, or restore the copy by hand and give it a new address with `incus config device set <copy> eth0 ipv4.address= ipv4.address.external=`.
 
 ---
 
 ## DNS registration
 
-`create-instance.sh` and `delete-instance.sh`/`delete-project.sh` can register and remove an A record in [Technitium DNS](https://technitium.com/dns/) for each instance, pointing `<instance-name>.<zone>` (e.g. `p42-tstng-ct01.infnet`) at the instance's forward IP - its external, NAT'd address, not its internal OVN address. This is entirely driven by `technitium-dns.sh`, a small shared helper sourced by all three scripts.
+`create-instance.sh`, `delete-instance.sh` and `delete-project.sh` register and remove an A record in [Technitium DNS](https://technitium.com/dns/) for each instance, pointing `<instance-name>.<zone>` (e.g. `p42-tstng-ct01.infnet`) at the instance's public 1:1 NAT address, not its internal OVN address. This is driven by `dns/technitium-dns.sh`, a small shared helper.
+
+DNS registration is best-effort and non-blocking: if Technitium is unreachable or misconfigured, the script prints a warning and continues.
 
 ### 1. Create an API token in Technitium
-
-DNS registration is best-effort and non-blocking: if Technitium is unreachable or misconfigured, the affected script prints a warning to stderr and continues rather than failing the deployment or decom.
 
 In the Technitium web console, go to Administration > Sessions > Create Token, and create a token for a user with permission to manage the zone in question. Unlike a login session, a token doesn't expire.
 
 ### 2. Configure `.env`
-
-Set these values in `.env` on the host(s) that run `create-instance.sh`, `delete-instance.sh`, and `delete-project.sh`:
 
 ```
 TECHNITIUM_URL='http://dns.example.infnet:5380'
@@ -314,67 +378,56 @@ TECHNITIUM_ZONE='infnet'
 TECHNITIUM_DNS_TTL='3600'
 ```
 
-The `infnet` zone must already exist in Technitium; the scripts only add and remove records within it, they don't create the zone itself.
-
-If `TECHNITIUM_URL`, `TECHNITIUM_API_TOKEN`, or `TECHNITIUM_ZONE` is left blank, DNS registration is skipped entirely (with a warning) and the scripts behave exactly as they did before this feature existed.
+The zone must already exist in Technitium. If `TECHNITIUM_URL`, `TECHNITIUM_API_TOKEN`, or `TECHNITIUM_ZONE` is blank, DNS registration is skipped with a warning.
 
 ### Behavior
 
-- `create-instance.sh` registers `<instance-name>.<zone>` -> the instance's forward IP right after the network forward is created.
-- `delete-instance.sh` and `delete-project.sh --delete-instances` remove that same record when they delete the instance's network forward.
-- Record management uses the instance's LXD name as the DNS hostname; renaming an instance in LXD does not update DNS.
-- `sync-dns-records.sh` backfills or corrects records for instances that predate this feature, or whose registration failed at creation time (e.g. Technitium was unreachable). See [`sync-dns-records.sh`](#sync-dns-recordssh) above.
+- Records use the instance name as the hostname; renaming an instance does not update DNS.
+- `sync-dns-records.sh` backfills or corrects records, e.g. after a Technitium outage made a registration fail.
 
 ---
 
 ## Backups
 
-`backup-instances.sh` and `restore-instance.sh` back instances up to a shared NFS export and restore them from it. Every node in the cluster runs the same script on its own timer; each node only backs up the instances currently located on itself, so the full cluster's instances are covered without any single node having to reach across to the others.
+`backup-instances.sh` and `restore-instance.sh` back instances up to an NFS export and restore them from it.
 
-### 1. Export and mount the NFS share
+### 1. Mount the NFS share
 
-On the NFS server, export a directory that all cluster nodes can reach. On each MicroCloud node (`nfs-common`/`nfs-utils` is already installed by `post-install.sh`), mount that export at the same path used by `NFS_BACKUP_DIR` in `.env`, for example:
-
-```
-# /etc/fstab, on every node
-nfs-server.example.com:/export/microcloud-backups  /mnt/microcloud-backups  nfs  defaults,_netdev  0  0
-```
-
-```bash
-mkdir -p /mnt/microcloud-backups
-mount /mnt/microcloud-backups
-```
-
-`backup-instances.sh` refuses to run if `NFS_BACKUP_DIR` isn't an actual mount point, so it won't silently fill up the local root disk if the NFS mount is down.
-
-### 2. Configure `.env` on every node
-
-Set (or confirm) these values in `.env` on each node - they should match on every node in the cluster:
+Set `NFS_BACKUP_SOURCE` and `NFS_BACKUP_DIR` in `.env` and `setup-incus-host.sh` adds the `/etc/fstab` entry and mounts it. By hand:
 
 ```
-NFS_BACKUP_DIR='/mnt/microcloud-backups'
+# /etc/fstab
+nfs-server.example.com:/export/incus-backups  /mnt/incus-backups  nfs  defaults,_netdev  0  0
+```
+
+`backup-instances.sh` refuses to run if `NFS_BACKUP_DIR` isn't a mount point, so it won't silently fill the local root disk when the NFS mount is down.
+
+### 2. Configure `.env`
+
+```
+NFS_BACKUP_DIR='/mnt/incus-backups'
 BACKUP_RETENTION_DAYS='7'
 BACKUP_WEEKLY_RETENTION_WEEKS='3'
 BACKUP_RETENTION_MONTHS='6'
 ```
 
-### 3. Install the scripts and systemd timer on every node
+On a cluster these should match on every member.
 
-Deploy this repository (including `.env`) to the same path on every node, e.g. `/opt/microcloud-maintenance`. Then install the timer unit:
+### 3. Install the timer
+
+`setup-incus-host.sh` does this when the repository lives at `/opt/infnet-incus-scripts`. By hand:
 
 ```bash
-cp backup/systemd/microcloud-backup.service backup/systemd/microcloud-backup.timer /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now microcloud-backup.timer
+sudo cp backup/systemd/infnet-incus-backup.service backup/systemd/infnet-incus-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now infnet-incus-backup.timer
 ```
 
-The shipped units assume the repository lives at `/opt/microcloud-maintenance` and that `NFS_BACKUP_DIR` is `/mnt/microcloud-backups`. If either differs on your site, update `ExecStart`/`WorkingDirectory` in `microcloud-backup.service` and `ConditionPathIsMountPoint` to match before copying them in.
-
-By default the timer runs nightly at 02:00 with up to a 20 minute random delay (`RandomizedDelaySec`), so all cluster nodes don't hit the NFS server at the exact same moment. Check a node's recent runs with:
+The units assume `/opt/infnet-incus-scripts` and `NFS_BACKUP_DIR=/mnt/incus-backups`; edit `ExecStart`, `WorkingDirectory` and `ConditionPathIsMountPoint` if yours differ. The timer runs nightly at 02:00 with up to 20 minutes of random delay. Check runs with:
 
 ```bash
-systemctl status microcloud-backup.timer
-journalctl -u microcloud-backup.service
+systemctl status infnet-incus-backup.timer
+journalctl -u infnet-incus-backup.service
 ```
 
 ### Backup layout and retention
@@ -386,26 +439,24 @@ ${NFS_BACKUP_DIR}/<project>/<instance>/<instance>_<timestamp>[_<tag>].tar.gz
 ${NFS_BACKUP_DIR}/<project>/<instance>/<instance>_<timestamp>[_<tag>].tar.gz.json
 ```
 
-Exports are written as `<file>.tar.gz.partial` and renamed only once `lxc export` succeeds, so an interrupted export never looks like a restorable backup. A failed export is logged and the run moves on to the next instance. The script then exits non-zero and lists the failures in its run record.
+Exports are written as `<file>.tar.gz.partial` and renamed only once `incus export` succeeds, so an interrupted export never looks like a restorable backup. A failed export is logged and the run moves on to the next instance. The script then exits non-zero and lists the failures in its run record.
 
 The `.json` sidecar records:
 
 ```jsonc
 {
-  "project": "p42-testing", "instance": "p42-tstng-ct01",
-  "member": "mc-node1",          // where the instance was located
-  "runner": "microcloud-vault",  // host that ran the backup (BACKUP_RUNNER_NAME or hostname)
-  "run_id": "20260926-174851_microcloud-vault_5144",
+  "project": "infra-dns", "instance": "pd20-dnsag-ct01",
+  "member": "inf-93148",         // where the instance was located
+  "runner": "inf-93148",         // host that ran the backup (BACKUP_RUNNER_NAME or hostname)
+  "run_id": "20260926-174851_inf-93148_5144",
   "tag": "adhoc", "description": "before upgrade", "requested_by": "admin",
   "created_at": "2026-09-26T17:48:55Z", "size_bytes": 1652555776
 }
 ```
 
-Every run that isn't a dry run also writes a run record to `${NFS_BACKUP_DIR}/.runs/<UTC timestamp>_<runner>_<pid>.json`, whether it succeeds or fails. The record holds the scope, the result, the files written, any per-instance failures, and what was pruned. Because it lives on the shared NFS export, the history covers every node and the Vault VM, which journald can't do. Run records older than `BACKUP_RUN_HISTORY_DAYS` (default `90`) are pruned along with backups.
+Every run that isn't a dry run also writes a run record to `${NFS_BACKUP_DIR}/.runs/<UTC timestamp>_<runner>_<pid>.json`, whether it succeeds or fails. The record holds the scope, the result, the files written, any per-instance failures, and what was pruned. Run records older than `BACKUP_RUN_HISTORY_DAYS` (default `90`) are pruned along with backups.
 
-Tagged (e.g. ad-hoc) backups follow the same retention as scheduled ones.
-
-Each run prunes that instance's directory on a tiered (grandfather-father-son) schedule, driven by three `.env` settings:
+Tagged (e.g. ad-hoc) backups follow the same retention as scheduled ones. Each run prunes that instance's directory on a tiered (grandfather-father-son) schedule:
 
 | Tier | Setting (default) | Behavior |
 |---|---|---|
@@ -422,13 +473,9 @@ With the defaults, a backup's total lifespan looks like:
 >180d   deleted
 ```
 
-Bucket boundaries are rolling day-counts from the moment each run starts, not calendar weeks/months. Buckets are computed independently per instance, so an instance with only occasional backups just keeps whichever ones it has; nothing is deleted to "fill" a schedule that was never met. Each run's `retention_days`/`weekly_weeks`/`retention_months` are recorded in its run record for auditing.
+Bucket boundaries are rolling day-counts from the moment each run starts, not calendar weeks/months, and are computed per instance.
 
-Each run also deletes files in that instance's directory outside this window. Backups are point-in-time exports of the instance's storage volume via `lxc export --optimized-storage`, taken without stopping the instance first - treat them as crash-consistent, not necessarily transaction-consistent for things like databases.
-
-### Restoring
-
-Run `backup/restore-instance.sh` on any node - it doesn't need to be the node the backup was taken on. See [`restore-instance.sh`](#restore-instancesh) above for usage.
+Containers are exported with `--optimized-storage` (a ZFS stream); VMs use a plain export, because LXD's optimized export miscounted VM snapshots and Incus shares that storage code. Backups are taken without stopping the instance - treat them as crash-consistent, not necessarily transaction-consistent for databases.
 
 ### Optional `.env` settings
 
@@ -436,21 +483,17 @@ Run `backup/restore-instance.sh` on any node - it doesn't need to be the node th
 |----------|---------|---------|
 | `BACKUP_RUN_HISTORY_DAYS` | `90` | How long run records in `.runs/` are kept |
 | `BACKUP_RUNNER_NAME` | short hostname | Name recorded as `runner` in sidecars and run records |
-| `LXD_CONF` (exported) | lxc default | Client config dir, e.g. for the Vault VM's dedicated cluster remote |
+| `INCUS_CONF` (exported) | incus default | Client config directory, e.g. for a remote backup runner |
 
-### Running backups from the MicroCloud Vault VM
-
-[MicroCloud Vault](https://github.com/infinatious/microcloud-backup-manager) deploys a small VM that holds a trusted `lxc` client certificate and mounts the same NFS export. It calls `backup-instances.sh --all-members` for ad-hoc backups and `restore-instance.sh` for restores. You can keep the per-node `microcloud-backup.timer` (the default), or let the VM run the nightly backup for the whole cluster instead. If you switch to the VM, disable the timer on every node.
+The [MicroCloud Vault](https://github.com/infinatious/microcloud-backup-manager) VM drove these scripts through the LXD API with `lxc`; it needs the same conversion before it can run them against Incus.
 
 ---
 
 ## Notes
 
-- The Linux profile is intended for cloud-init based image deployment.
-- The Windows profile is intended for Windows-capable images and uses a `64GiB` root disk.
-- The image picker filters the list based on the chosen profile family so that Linux selections exclude names containing `win`, and Windows selections only show images whose names include `win`.
-- The following can be used to set image aliases:
-```
-lxc image list local: -c LFd
-lxc image alias create NAME FINGERPRINT --project default
-```
+- Image aliases:
+  ```
+  incus image list local: -c lFd
+  incus image alias create NAME FINGERPRINT --project default
+  ```
+- The image picker filters by profile family: Linux lists images whose aliases don't contain `win`, Windows lists only those that do.

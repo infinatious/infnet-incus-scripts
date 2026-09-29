@@ -41,6 +41,9 @@ source "${ENV_FILE}"
 [[ -f "${DNS_LIB_FILE}" ]] || fail "${DNS_LIB_FILE} not found."
 # shellcheck source=/dev/null
 source "${DNS_LIB_FILE}"
+[[ -f "${SCRIPT_DIR}/lib/public-ip.sh" ]] || fail "${SCRIPT_DIR}/lib/public-ip.sh not found."
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/public-ip.sh"
 
 PROJECT_ID_ARG=''
 DELETE_INSTANCES_ARG=''
@@ -70,17 +73,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-command -v lxc >/dev/null 2>&1 || fail 'lxc command not found in PATH.'
+command -v incus >/dev/null 2>&1 || fail 'incus command not found in PATH.'
 command -v jq >/dev/null 2>&1 || fail 'jq command not found in PATH.'
 command -v curl >/dev/null 2>&1 || fail 'curl command not found in PATH.'
 
 mapfile -t PROJECT_OPTIONS < <(
-  lxc project list --format csv 2>/dev/null | while IFS=',' read -r PROJECT_NAME _ _ _ _ _ _ PROJECT_DESCRIPTION _; do
-    [[ -n "${PROJECT_NAME}" ]] || continue
-    if [[ "${PROJECT_DESCRIPTION}" =~ ^Project[[:space:]]ID:[[:space:]]([0-9]+)$ ]]; then
-      printf '%s\t%s\n' "${BASH_REMATCH[1]}" "${PROJECT_NAME}"
-    fi
-  done
+  incus project list -f json 2>/dev/null \
+    | jq -r '.[] | select(.description | test("^Project ID: [0-9]+$")) | "\(.description | ltrimstr("Project ID: "))\t\(.name)"'
 )
 (( ${#PROJECT_OPTIONS[@]} > 0 )) || fail 'no projects with project ID metadata were found.'
 
@@ -101,9 +100,9 @@ PROJECT_NAME="$(awk -F '\t' -v pid="${SELECTED_PROJECT_ID}" '$1 == pid {print $2
 PROFILE_NAME="${PROJECT_NAME}"
 NETWORK_NAME="${PROJECT_NAME}"
 
-lxc project show "${PROJECT_NAME}" >/dev/null 2>&1 || fail "project '${PROJECT_NAME}' does not exist."
+incus project show "${PROJECT_NAME}" >/dev/null 2>&1 || fail "project '${PROJECT_NAME}' does not exist."
 
-INSTANCE_LIST="$(lxc list --project "${PROJECT_NAME}" --format csv -c n 2>/dev/null || true)"
+INSTANCE_LIST="$(incus list --project "${PROJECT_NAME}" --format csv -c n 2>/dev/null || true)"
 if [[ -n "${INSTANCE_LIST}" ]]; then
   if [[ "${DELETE_INSTANCES_ARG}" == 'yes' ]]; then
     if [[ "${CONFIRM_ARG}" != 'yes' ]]; then
@@ -115,15 +114,15 @@ if [[ -n "${INSTANCE_LIST}" ]]; then
 
     while IFS= read -r INSTANCE_NAME; do
       [[ -n "${INSTANCE_NAME}" ]] || continue
-      FORWARD_IP="$(lxc config get "${INSTANCE_NAME}" user.network_forward_ipv4 --project "${PROJECT_NAME}" 2>/dev/null || true)"
+      PUBLIC_IP="$(nat_instance_address "${INSTANCE_NAME}" "${PROJECT_NAME}")"
       echo "Stopping instance '${INSTANCE_NAME}'..."
-      lxc stop "${INSTANCE_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
+      incus stop "${INSTANCE_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
       echo "Deleting instance '${INSTANCE_NAME}'..."
-      run lxc delete "${INSTANCE_NAME}" --project "${PROJECT_NAME}"
-      if [[ -n "${FORWARD_IP}" ]]; then
-        echo "Deleting forward '${FORWARD_IP}' on network '${NETWORK_NAME}'..."
-        run lxc network forward delete "${NETWORK_NAME}" "${FORWARD_IP}" --project "${PROJECT_NAME}"
-        dns_deregister_record "${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}" "${FORWARD_IP}" || true
+      run incus delete "${INSTANCE_NAME}" --project "${PROJECT_NAME}"
+      if [[ -n "${PUBLIC_IP}" ]]; then
+        echo "Releasing public IP '${PUBLIC_IP}' (network forward on '${NETWORK_NAME}')..."
+        run nat_release "${PROJECT_NAME}" "${NETWORK_NAME}" "${PUBLIC_IP}"
+        dns_deregister_record "${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}" "${PUBLIC_IP}" || true
       fi
     done < <(printf '%s\n' "${INSTANCE_LIST}" | sed '/^$/d')
   else
@@ -134,7 +133,7 @@ if [[ -n "${INSTANCE_LIST}" ]]; then
   fi
 fi
 
-mapfile -t PROFILE_NAMES < <(lxc profile list --project "${PROJECT_NAME}" --format csv -c n 2>/dev/null || true)
+mapfile -t PROFILE_NAMES < <(incus profile list --project "${PROJECT_NAME}" --format csv -c n 2>/dev/null || true)
 if (( ${#PROFILE_NAMES[@]} > 0 )); then
   for PROFILE_NAME in "${PROFILE_NAMES[@]}"; do
     if [[ "${PROFILE_NAME}" == 'default' ]]; then
@@ -142,21 +141,21 @@ if (( ${#PROFILE_NAMES[@]} > 0 )); then
       continue
     fi
     echo "Deleting profile '${PROFILE_NAME}'..."
-    run lxc profile delete "${PROFILE_NAME}" --project "${PROJECT_NAME}"
+    run incus profile delete "${PROFILE_NAME}" --project "${PROJECT_NAME}"
   done
 else
   echo "No project profiles found, skipping."
 fi
 
-if lxc network show "${NETWORK_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1; then
+if incus network show "${NETWORK_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1; then
   echo "Deleting network '${NETWORK_NAME}'..."
-  run lxc network delete "${NETWORK_NAME}" --project "${PROJECT_NAME}"
+  run incus network delete "${NETWORK_NAME}" --project "${PROJECT_NAME}"
 else
   echo "Network '${NETWORK_NAME}' not found, skipping."
 fi
 
 echo "Deleting project '${PROJECT_NAME}'..."
-run lxc project delete "${PROJECT_NAME}"
+run incus project delete "${PROJECT_NAME}"
 
 echo
 echo 'Deletion complete.'
