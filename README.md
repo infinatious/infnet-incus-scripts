@@ -146,7 +146,7 @@ Every instance gets one public IPv4 that maps to it in both directions. Incus bu
 
 | Direction | Mechanism | Command the scripts run |
 |---|---|---|
-| Inbound | A **network forward** on the project's OVN network, listening on the public IP, with the instance as default target (every port and protocol) | `incus network forward create <network> <public-ip> target_address=<internal-ip> --project <project>` |
+| Inbound | A **network forward** on the project's OVN network, listening on the public IP, with the instance as default target (every port and protocol); its description is the instance name, so forward listings show which machine owns each public IP | `incus network forward create <network> <public-ip> target_address=<internal-ip> --description <instance> --project <project>` |
 | Outbound | **`ipv4.address.external`** on the instance NIC, which adds a per-NIC SNAT rule so its traffic leaves from that same public IP instead of the network's shared address | `incus config device override <instance> eth0 ipv4.address=<internal-ip> ipv4.address.external=<public-ip> --project <project>` |
 
 Constraints the scripts enforce:
@@ -154,7 +154,7 @@ Constraints the scripts enforce:
 - **Incus 7.3+ (or a 7.0 LTS release after 7.0.1).** Earlier versions implement a default-target forward as a portless OVN load balancer that collides with the NIC's SNAT rule: it drops the SYN-ACK of every connection the instance opens itself, so outbound TCP hangs while ping and inbound traffic still work. Fixed upstream in commit `42053c457d` ("Fix NAT for network forward default targets"), which uses a plain `dnat` rule instead. Verified on inf-93148 with Incus 7.0.1. `create-instance.sh` refuses older versions.
 - **The forward must exist first.** Incus rejects `ipv4.address.external` unless the address is already a network forward on the NIC's network (it is validated against the forward table), so the NIC setting can't replace the forward - both are needed.
 - **Public IPs come from the uplink's `ipv4.routes`.** Forward listen addresses must fall inside those routes. `ipv4.ovn.ranges` doesn't qualify: it is reserved for the OVN routers' own uplink addresses. `create-instance.sh` refuses to run if the uplink has no `ipv4.routes`.
-- **Incus has no `--allocate` for forwards** (that was an LXD feature), so `lib/public-ip.sh` picks addresses itself: the first address in `ipv4.routes` that isn't the gateway, the uplink subnet's network/broadcast address, or already used by any forward, load balancer or OVN router on that uplink in any project.
+- **Incus has no `--allocate` for forwards** (that was an LXD feature), so `lib/public-ip.sh` picks addresses itself: a random address in `ipv4.routes` that isn't the gateway, the uplink subnet's network/broadcast address, or already used by any forward, load balancer or OVN router on that uplink in any project.
 - **The server needs the `network_ovn_external_nic_address` API extension**, which every version new enough for the fix above has. `create-instance.sh` checks for it.
 - **`eth0` comes from the profile**, so the NIC settings are applied with `incus config device override`, which copies the profile device onto the instance. `config device set` only works once the instance has its own copy.
 - **The internal address is pinned** (`ipv4.address`) to the address OVN handed out at boot, so the forward target stays valid across restarts. The NIC is re-plugged once at creation to apply it.
@@ -290,10 +290,10 @@ Creates the project (description `Project ID: 42`, which the other scripts use t
 - `--profile-type` is `linux` or `win`.
 - `--cpu`, `--ram`, and `--disk` override the profile defaults.
 - `--image-index` selects the image from the numbered filtered list; `--image-alias` selects it by exact alias.
-- `--public-ip` picks the 1:1 NAT address; by default the first free address in the uplink's `ipv4.routes` is used. Either way it is checked before the instance is created.
+- `--public-ip IP` gives the instance that 1:1 NAT address, `--public-ip random` a random free one from the uplink's `ipv4.routes`, and `--no-public-ip` none at all (it then only reaches out through its project's shared NAT address, and gets no DNS record). With none of these the script asks whether to assign a public IP and which one (blank = random); when it isn't run from a terminal it picks a random one. The address is checked before the instance is created.
 - `--description-suffix` appends text to the instance description. It is only prompted for when the script is run with no arguments at all.
 
-The instance is named `<env prefix><project id>-<service code>-<ct|vs><nn>` (e.g. `pd20-dnsag-ct01`). Once it has an address the script creates the [1:1 NAT](#11-nat), registers `<instance-name>.<zone>` in Technitium (if configured), and sets the description to `<public ip> <image alias> [suffix]`.
+The instance is named `<env prefix><project id>-<service code>-<ct|vs><nn>` (e.g. `pd20-dnsag-ct01`). Once it has an address the script creates the [1:1 NAT](#11-nat) and registers `<instance-name>.<zone>` in Technitium (if configured) - both only when it has a public IP - and sets the description to `<public ip, or internal ip without one> <image alias> [suffix]`.
 
 The internal address is read from the guest (needs the `incus-agent` in VMs) or, failing that, from the address OVN assigned to the NIC - so VMs without the agent, such as a fresh Windows install, still work.
 

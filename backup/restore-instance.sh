@@ -236,11 +236,13 @@ fi
 if [[ -n "${NAT_PUBLIC}" ]]; then
   if [[ "${NAT_FORWARD_CREATED}" == 'pending' ]]; then
     echo "Recreating network forward ${NAT_PUBLIC} -> ${NAT_INTERNAL}..."
-    run incus network forward create "${NAT_NETWORK}" "${NAT_PUBLIC}" target_address="${NAT_INTERNAL}" --project "${PROJECT_NAME}"
+    run incus network forward create "${NAT_NETWORK}" "${NAT_PUBLIC}" target_address="${NAT_INTERNAL}" \
+      --description "${TARGET_NAME}" --project "${PROJECT_NAME}"
     NAT_FORWARD_CREATED='yes'
   else
     echo "Reusing existing network forward ${NAT_PUBLIC}, pointing it at ${NAT_INTERNAL}..."
     run incus network forward set "${NAT_NETWORK}" "${NAT_PUBLIC}" target_address="${NAT_INTERNAL}" --project "${PROJECT_NAME}"
+    run incus network forward set "${NAT_NETWORK}" "${NAT_PUBLIC}" description="${TARGET_NAME}" --property --project "${PROJECT_NAME}"
   fi
 fi
 

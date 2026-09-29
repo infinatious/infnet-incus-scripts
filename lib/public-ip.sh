@@ -95,27 +95,25 @@ if str(ip) in used:
 ' "${address}" "${routes}" "${gateway}"
 }
 
-# Prints the first free public IP inside the uplink routes.
+# Prints a random free public IP inside the uplink routes.
 nat_allocate_address() {
   local uplink="$1" routes gateway
   routes="$(nat_uplink_routes "${uplink}")" || return 1
   gateway="$(incus network get "${uplink}" ipv4.gateway --project default 2>/dev/null)"
   nat_used_addresses "${uplink}" | python3 -c '
-import ipaddress, sys
+import ipaddress, random, sys
 routes, gateway = sys.argv[1], sys.argv[2]
 used = {l.strip() for l in sys.stdin if l.strip()}
 reserved = set()
 if gateway:
     gw = ipaddress.IPv4Interface(gateway)
     reserved = {gw.ip, gw.network.network_address, gw.network.broadcast_address}
-for route in routes.split(","):
-    if not route.strip():
-        continue
-    for ip in ipaddress.IPv4Network(route.strip(), strict=False):
-        if ip not in reserved and str(ip) not in used:
-            print(ip)
-            sys.exit(0)
-sys.exit(f"Error: no free public IPv4 address left in uplink ipv4.routes ({routes}).")
+free = [ip for route in routes.split(",") if route.strip()
+        for ip in ipaddress.IPv4Network(route.strip(), strict=False)
+        if ip not in reserved and str(ip) not in used]
+if not free:
+    sys.exit(f"Error: no free public IPv4 address left in uplink ipv4.routes ({routes}).")
+print(random.SystemRandom().choice(free))
 ' "${routes}" "${gateway}"
 }
 
@@ -139,13 +137,16 @@ nat_set_nic() {
   fi
 }
 
-# Creates the 1:1 NAT mapping between a public IP and an instance.
+# Creates the 1:1 NAT mapping between a public IP and an instance. The
+# forward's description is the instance name (its hostname), so forward
+# listings show which machine owns each public IP.
 # The internal address is pinned on the NIC so the forward target survives
 # restarts; it is the instance's current address, so nothing is renumbered.
 nat_attach() {
   local instance="$1" project="$2" network="$3" public_ip="$4" internal_ip="$5"
 
-  incus network forward create "${network}" "${public_ip}" target_address="${internal_ip}" --project "${project}" || return 1
+  incus network forward create "${network}" "${public_ip}" target_address="${internal_ip}" \
+    --description "${instance}" --project "${project}" || return 1
 
   if ! nat_set_nic "${instance}" "${project}" ipv4.address="${internal_ip}" ipv4.address.external="${public_ip}"; then
     echo "Error: unable to set ${PUBLIC_IP_NIC} external address on '${instance}'; removing forward ${public_ip}." >&2

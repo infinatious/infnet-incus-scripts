@@ -13,7 +13,7 @@ fail() {
 
 usage() {
   cat <<'EOF'
-Usage: create-instance.sh --project-id ID --environment ENV --service-code CODE --profile-type TYPE [--cpu N] [--ram GIB] [--disk GIB] [--image-index N] [--image-alias NAME] [--public-ip IP] [--description-suffix TEXT]
+Usage: create-instance.sh --project-id ID --environment ENV --service-code CODE --profile-type TYPE [--cpu N] [--ram GIB] [--disk GIB] [--image-index N] [--image-alias NAME] [--public-ip IP|random | --no-public-ip] [--description-suffix TEXT]
 
 Options:
   --project-id ID          Numeric project ID to select the project.
@@ -25,8 +25,13 @@ Options:
   --disk GIB               Override boot disk size in GiB.
   --image-index N          Pick the desired image by the displayed list index.
   --image-alias NAME       Pick an image by exact alias name.
-  --public-ip IP           1:1 NAT public IPv4 to assign (default: first free
-                           address in the uplink's ipv4.routes).
+  --public-ip IP|random    Give the instance a 1:1 NAT public IPv4: a specific
+                           address from the uplink's ipv4.routes, or 'random'
+                           for a random free one.
+  --no-public-ip           No public IP; the instance only reaches out through
+                           its project's shared NAT address.
+                           With neither flag the script asks, or picks a random
+                           public IP when not run from a terminal.
   --description-suffix TEXT
                            Optional suffix appended to the generated description.
   --help                   Show this help message.
@@ -72,6 +77,7 @@ DISK_ARG=''
 IMAGE_INDEX_ARG=''
 IMAGE_ALIAS_ARG=''
 PUBLIC_IP_ARG=''
+NO_PUBLIC_IP_ARG=''
 DESCRIPTION_SUFFIX_ARG=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -124,6 +130,10 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || fail 'missing value for --public-ip.'
       PUBLIC_IP_ARG="$2"
       shift 2
+      ;;
+    --no-public-ip)
+      NO_PUBLIC_IP_ARG='yes'
+      shift
       ;;
     --description-suffix)
       [[ $# -ge 2 ]] || fail 'missing value for --description-suffix.'
@@ -281,16 +291,40 @@ PROJECT_ID="$(awk -F '[./]' '{print $3}' <<< "${NETWORK_IPV4_CIDR}")"
 
 # Settle the 1:1 NAT public IP before launching so a bad address or an
 # exhausted range fails here instead of leaving an instance behind.
-nat_require_support || exit 1
-UPLINK_NAME="$(nat_network_uplink "${NETWORK_NAME}" "${PROJECT_NAME}")"
-[[ -n "${UPLINK_NAME}" && "${UPLINK_NAME}" != 'none' ]] || fail "network '${NETWORK_NAME}' has no uplink network, so it cannot use 1:1 NAT."
-if [[ -n "${PUBLIC_IP_ARG}" ]]; then
-  nat_validate_address "${UPLINK_NAME}" "${PUBLIC_IP_ARG}" || exit 1
-  PUBLIC_IPV4="${PUBLIC_IP_ARG}"
+[[ -n "${PUBLIC_IP_ARG}" && -n "${NO_PUBLIC_IP_ARG}" ]] && fail '--public-ip and --no-public-ip are mutually exclusive.'
+if [[ -n "${NO_PUBLIC_IP_ARG}" ]]; then
+  PUBLIC_IP_CHOICE='none'
+elif [[ -n "${PUBLIC_IP_ARG}" ]]; then
+  PUBLIC_IP_CHOICE="${PUBLIC_IP_ARG}"
+elif [[ -t 0 ]]; then
+  read -r -p 'Assign a public IP (1:1 NAT)? [Y/n]: ' WANT_PUBLIC_IP
+  if [[ "${WANT_PUBLIC_IP,,}" =~ ^(n|no)$ ]]; then
+    PUBLIC_IP_CHOICE='none'
+  else
+    UPLINK_NAME="$(nat_network_uplink "${NETWORK_NAME}" "${PROJECT_NAME}")"
+    ROUTES_HINT="$(incus network get "${UPLINK_NAME}" ipv4.routes --project default 2>/dev/null || true)"
+    read -r -p "Public IP from ${ROUTES_HINT:-the uplink routes} (blank for a random free address): " PUBLIC_IP_CHOICE
+    PUBLIC_IP_CHOICE="${PUBLIC_IP_CHOICE:-random}"
+  fi
 else
-  PUBLIC_IPV4="$(nat_allocate_address "${UPLINK_NAME}")" || exit 1
+  PUBLIC_IP_CHOICE='random'
 fi
-echo "Public IPv4 for 1:1 NAT: ${PUBLIC_IPV4} (uplink '${UPLINK_NAME}')."
+
+PUBLIC_IPV4=''
+if [[ "${PUBLIC_IP_CHOICE}" != 'none' ]]; then
+  nat_require_support || exit 1
+  UPLINK_NAME="$(nat_network_uplink "${NETWORK_NAME}" "${PROJECT_NAME}")"
+  [[ -n "${UPLINK_NAME}" && "${UPLINK_NAME}" != 'none' ]] || fail "network '${NETWORK_NAME}' has no uplink network, so it cannot use 1:1 NAT."
+  if [[ "${PUBLIC_IP_CHOICE}" == 'random' ]]; then
+    PUBLIC_IPV4="$(nat_allocate_address "${UPLINK_NAME}")" || exit 1
+  else
+    nat_validate_address "${UPLINK_NAME}" "${PUBLIC_IP_CHOICE}" || exit 1
+    PUBLIC_IPV4="${PUBLIC_IP_CHOICE}"
+  fi
+  echo "Public IPv4 for 1:1 NAT: ${PUBLIC_IPV4} (uplink '${UPLINK_NAME}')."
+else
+  echo 'No public IP: the instance will only reach out through its project NAT address.'
+fi
 
 case "${ENV_CODE}" in
   p)
@@ -397,14 +431,20 @@ for _ in $(seq 1 60); do
   [[ -n "${INSTANCE_IPV4}" ]] && break
   sleep 2
 done
-[[ -n "${INSTANCE_IPV4}" ]] || fail "unable to determine the IPv4 address of '${INSTANCE_NAME}' after waiting; no 1:1 NAT was created."
-
-echo "Mapping public ${PUBLIC_IPV4} 1:1 to ${INSTANCE_IPV4} on '${NETWORK_NAME}'..."
-nat_attach "${INSTANCE_NAME}" "${PROJECT_NAME}" "${NETWORK_NAME}" "${PUBLIC_IPV4}" "${INSTANCE_IPV4}" \
-  || fail "unable to create the 1:1 NAT for '${INSTANCE_NAME}'. The instance exists without a public IP."
-
 DNS_FQDN="${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}"
-dns_register_record "${DNS_FQDN}" "${PUBLIC_IPV4}" || true
+if [[ -n "${PUBLIC_IPV4}" ]]; then
+  [[ -n "${INSTANCE_IPV4}" ]] || fail "unable to determine the IPv4 address of '${INSTANCE_NAME}' after waiting; no 1:1 NAT was created."
+
+  echo "Mapping public ${PUBLIC_IPV4} 1:1 to ${INSTANCE_IPV4} on '${NETWORK_NAME}'..."
+  nat_attach "${INSTANCE_NAME}" "${PROJECT_NAME}" "${NETWORK_NAME}" "${PUBLIC_IPV4}" "${INSTANCE_IPV4}" \
+    || fail "unable to create the 1:1 NAT for '${INSTANCE_NAME}'. The instance exists without a public IP."
+
+  dns_register_record "${DNS_FQDN}" "${PUBLIC_IPV4}" || true
+else
+  # Internal OVN addresses aren't reachable from INFNET, so they get no record.
+  [[ -n "${INSTANCE_IPV4}" ]] || INSTANCE_IPV4='unknown'
+  echo "No public IP, so no DNS record is registered for '${DNS_FQDN}'."
+fi
 
 if [[ -n "${DESCRIPTION_SUFFIX_ARG}" ]]; then
   DESCRIPTION_SUFFIX="${DESCRIPTION_SUFFIX_ARG}"
@@ -413,7 +453,7 @@ elif (( ARGS_PROVIDED == 0 )); then
 else
   DESCRIPTION_SUFFIX=''
 fi
-DESCRIPTION_TEXT="${PUBLIC_IPV4} ${SELECTED_ALIAS}"
+DESCRIPTION_TEXT="${PUBLIC_IPV4:-${INSTANCE_IPV4}} ${SELECTED_ALIAS}"
 if [[ -n "${DESCRIPTION_SUFFIX}" ]]; then
   DESCRIPTION_TEXT="${DESCRIPTION_TEXT} ${DESCRIPTION_SUFFIX}"
 fi
@@ -445,8 +485,8 @@ echo "CPU         : ${CPU_CORES}"
 echo "RAM         : ${RAM_GIB}GiB"
 echo "Boot disk   : ${DISK_GIB}GiB"
 echo "Instance IP : ${INSTANCE_IPV4}"
-echo "Public IP   : ${PUBLIC_IPV4} (1:1 NAT)"
+echo "Public IP   : ${PUBLIC_IPV4:-none}${PUBLIC_IPV4:+ (1:1 NAT)}"
 echo "Description : ${DESCRIPTION_TEXT}"
-if technitium_configured; then
+if [[ -n "${PUBLIC_IPV4}" ]] && technitium_configured; then
   echo "DNS         : ${DNS_FQDN} -> ${PUBLIC_IPV4}"
 fi
