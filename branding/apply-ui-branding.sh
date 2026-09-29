@@ -65,24 +65,39 @@ for asset in branding.css logo.svg fonts/special-gothic.ttf; do
   [[ -f "${ASSETS_DIR}/${asset}" ]] || fail "missing branding asset '${ASSETS_DIR}/${asset}'."
 done
 
+# Every asset URL carries a version derived from the asset contents. A CDN in
+# front of the UI (us-west sits behind Cloudflare, which keeps static files
+# well past their max-age) would otherwise keep serving the old logo and
+# stylesheet after a change; index.html itself isn't cached, so new versions
+# show up on the next page load.
+VERSION="$(cat "${ASSETS_DIR}/branding.css" "${ASSETS_DIR}/logo.svg" "${ASSETS_DIR}/fonts/special-gothic.ttf" \
+  "${ASSETS_DIR}/favicon-32x32.png" 2>/dev/null | md5sum | cut -c1-10)"
+
 # Our own files live in a namespaced directory the package never touches.
 install -d -m 0755 "${UI_DIR}/assets/infnet/fonts"
-install -m 0644 "${ASSETS_DIR}/branding.css" "${UI_DIR}/assets/infnet/branding.css"
 install -m 0644 "${ASSETS_DIR}/fonts/special-gothic.ttf" "${UI_DIR}/assets/infnet/fonts/special-gothic.ttf"
+install -m 0644 "${ASSETS_DIR}/logo.svg" "${UI_DIR}/assets/infnet/logo.svg"
+{
+  cat "${ASSETS_DIR}/branding.css"
+  printf '\n/* Added by apply-ui-branding.sh: versioned logo URL, see above. */\n'
+  printf '.p-panel__logo .p-panel__logo-image {\n  content: url("logo.svg?v=%s");\n}\n' "${VERSION}"
+} > "${UI_DIR}/assets/infnet/branding.css"
+chmod 0644 "${UI_DIR}/assets/infnet/branding.css"
 
-# The logo and favicon paths are hardcoded in the UI, so those files are
-# replaced in place.
+# The logo and favicon paths are also hardcoded in the UI, so those files are
+# replaced in place too (for access that bypasses the CDN).
 install -m 0644 "${ASSETS_DIR}/logo.svg" "${UI_DIR}/assets/img/incus-logo.svg"
 if [[ -f "${ASSETS_DIR}/favicon-32x32.png" ]]; then
+  install -m 0644 "${ASSETS_DIR}/favicon-32x32.png" "${UI_DIR}/assets/infnet/favicon-32x32.png"
   install -m 0644 "${ASSETS_DIR}/favicon-32x32.png" "${UI_DIR}/assets/img/favicon-32x32.png"
+  sed -i -E "s|href=\"assets/(img\|infnet)/favicon-32x32\.png[^\"]*\"|href=\"assets/infnet/favicon-32x32.png?v=${VERSION}\"|" "${UI_DIR}/index.html"
 fi
 
 # Link the stylesheet last in <head> so it follows the UI's own stylesheet
 # (added to <head> by the inline loader script) and wins at equal specificity.
 INDEX="${UI_DIR}/index.html"
-if ! grep -qF "${MARKER}" "${INDEX}"; then
-  sed -i "s|</head>|    ${MARKER}<link rel=\"stylesheet\" href=\"assets/infnet/branding.css\">\n  </head>|" "${INDEX}"
-fi
+sed -i "/${MARKER}/d" "${INDEX}"
+sed -i "s|</head>|    ${MARKER}<link rel=\"stylesheet\" href=\"assets/infnet/branding.css?v=${VERSION}\">\n  </head>|" "${INDEX}"
 sed -i "s|<title>Incus UI</title>|<title>${BRAND_NAME}</title>|" "${INDEX}"
 
 # Browser tab titles are built in the main bundle as "<page> | Incus UI".

@@ -237,6 +237,8 @@ sudo /opt/infnet-incus-scripts/branding/apply-ui-branding.sh --install-hook
 
 Reload the UI with a hard refresh. `setup-incus-host.sh` already runs this.
 
+**Asset URLs are versioned.** The stylesheet, logo and favicon are linked with `?v=<hash of the assets>`, so a CDN in front of the UI can't keep serving old branding: us-west sits behind Cloudflare, which kept the old logo well past its `max-age`. `index.html` isn't cached, so a change shows up on the next page load.
+
 **Package upgrades restore the stock files.** `--install-hook` adds `/etc/apt/apt.conf.d/99-infnet-incus-ui-branding`, which re-runs the script after every `dpkg` run, so an `apt upgrade` is rebranded automatically. The script is idempotent.
 
 ### Changing the assets
