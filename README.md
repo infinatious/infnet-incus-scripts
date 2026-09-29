@@ -225,8 +225,7 @@ The web UI is the `incus-ui-canonical` package: static files in **`/opt/incus/ui
 | Change | How |
 |---|---|
 | Font: Special Gothic | Copies `branding/assets/fonts/special-gothic.ttf` and `branding.css` into `/opt/incus/ui/assets/infnet/` and links the stylesheet from `index.html`. The stylesheet redefines the UI's `Ubuntu variable` font family to point at Special Gothic, so every text face changes without touching the hashed JS/CSS bundles. `Ubuntu Mono` is left alone for the terminal and code editors. |
-| Logo | Replaces `/opt/incus/ui/assets/img/incus-logo.svg` (the path is hardcoded in the UI bundle) with `branding/assets/logo.svg`: the Infinatious mark on a dark badge, so it reads on both the light and dark themes. |
-| Name | The stylesheet hides the "Incus UI" label beside the logo and shows "Infinatious Cloud" in its place. |
+| Logo | Replaces `/opt/incus/ui/assets/img/incus-logo.svg` (the path is hardcoded in the UI bundle) with `branding/assets/logo.svg`, the white "Infinatious Cloud" wordmark. The stylesheet hides the UI's own "Incus UI" label, inverts the wordmark to black on the light theme, and crops it to the square badge when the sidebar is collapsed. |
 | Favicon | Replaces `/opt/incus/ui/assets/img/favicon-32x32.png` with `branding/assets/favicon-32x32.png`. |
 | Page titles | `<title>` in `index.html`, and the `<page> \| Incus UI` tab-title literal in the main JS bundle, become `Infinatious Cloud`. If a future release changes that literal the script warns and leaves titles alone. |
 
@@ -244,10 +243,10 @@ Reload the UI with a hard refresh. `setup-incus-host.sh` already runs this.
 
 Replace the files in `branding/assets/` and re-run the script:
 
-- `logo.svg` - shown 32 px tall; keep a `viewBox` so it scales instead of cropping.
+- `logo.svg` - shown 30 px tall (max 184 px wide); keep a `viewBox` so it scales instead of cropping. White artwork is expected (it is inverted on the light theme), with a square badge at the left for the collapsed sidebar.
 - `favicon-32x32.png` - optional; e.g. `magick -background none -density 72 logo.svg -resize 32x32 favicon-32x32.png`.
 - `fonts/special-gothic.ttf` - Special Gothic variable font (weights 400-700, widths 75-125%).
-- `branding.css` - the product name lives in the `content:` of `.p-panel__logo .logo-text::after`.
+- `branding.css` - logo sizing and theme handling.
 
 To undo: `sudo rm /etc/apt/apt.conf.d/99-infnet-incus-ui-branding && sudo apt-get install --reinstall incus-ui-canonical`.
 

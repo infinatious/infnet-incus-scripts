@@ -35,23 +35,29 @@
        url("fonts/special-gothic.ttf") format("truetype");
 }
 
-/* Sidebar logo: the mark (on its own dark badge, so it reads on both the
-   light and dark themes) replaces incus-logo.svg; the "Incus UI" label next
-   to it is hidden and replaced with the product name. */
+/* Sidebar logo: the "Infinatious Cloud" wordmark (white, text included)
+   replaces incus-logo.svg, so the UI's own "Incus UI" label is hidden. */
 .p-panel__logo .p-panel__logo-image {
-  height: 32px;
-  margin-top: 4px;
+  height: 30px;
+  width: auto;
+  max-width: 184px;
+  margin-top: 3px;
 }
 
 .p-panel__logo .logo-text {
-  font-size: 0;
-  white-space: nowrap;
+  display: none;
 }
 
-.p-panel__logo .logo-text::after {
-  content: "Infinatious Cloud";
-  font-family: "Special Gothic", sans-serif;
-  font-size: 1.25rem;
-  font-weight: 600;
-  line-height: 2.25rem;
+/* The wordmark is white only; the UI marks the label is-light on the light
+   theme, so invert the image there to keep it visible. */
+.p-panel__logo:has(.logo-text.is-light) .p-panel__logo-image {
+  filter: invert(1);
+}
+
+/* The collapsed sidebar is 4rem wide: show only the square badge at the
+   left of the wordmark. */
+.l-navigation.is-collapsed .p-panel__logo .p-panel__logo-image {
+  width: 30px;
+  object-fit: cover;
+  object-position: left center;
 }
