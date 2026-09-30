@@ -9,18 +9,6 @@ fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${ROOT_DIR}/.env"
-INSTALL_DIR='/opt/infnet-incus-scripts'
-ZABBLY_KEY_FINGERPRINT='4EFC590696CB15B87C73A3AD82CC8797C838DCFD'
-
-fail() {
-  echo "Error: $*" >&2
-  exit 1
-}
-
-step() {
-  echo
-  echo "==> $*"
-}
 
 usage() {
   cat <<'EOF'
@@ -31,6 +19,9 @@ scripts in this repository expect: Zabbly Incus packages (plus the web UI and
 incus-extra), a local OVN control plane, the ZFS storage pool, the physical
 uplink, a default OVN network, the NFS backup mount, the nightly backup timer,
 optional Authentik OIDC, and the Infinatious UI branding.
+
+To grow it into a cluster later, run cluster-enable.sh on it, then
+cluster-join.sh on each new host.
 
 Every step is safe to re-run. Settings come from the "Host bootstrap" and
 "OIDC" sections of .env (see .env.example).
@@ -49,14 +40,15 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --wipe-storage-device) WIPE_STORAGE_DEVICE='yes'; shift ;;
     --help|-h) usage; exit 0 ;;
-    *) fail "unknown argument: $1" ;;
+    *) echo "Error: unknown argument: $1" >&2; exit 1 ;;
   esac
 done
 
-(( EUID == 0 )) || fail 'run this script as root (sudo).'
-[[ -f "${ENV_FILE}" ]] || fail "${ENV_FILE} not found."
+[[ -f "${ENV_FILE}" ]] || { echo "Error: ${ENV_FILE} not found." >&2; exit 1; }
 # shellcheck source=/dev/null
 source "${ENV_FILE}"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/common.sh"
 
 : "${INCUS_CHANNEL:?INCUS_CHANNEL not set in ${ENV_FILE}}"
 : "${INCUS_ADMIN_USER:?INCUS_ADMIN_USER not set in ${ENV_FILE}}"
@@ -73,76 +65,26 @@ source "${ENV_FILE}"
 : "${PROJECT_NAT_IPV4_PREFIX:?PROJECT_NAT_IPV4_PREFIX not set in ${ENV_FILE}}"
 : "${NFS_BACKUP_DIR:?NFS_BACKUP_DIR not set in ${ENV_FILE}}"
 
-. /etc/os-release
-[[ "${ID}" == 'ubuntu' || "${ID}" == 'debian' ]] || fail "unsupported OS '${ID}'; Zabbly packages target Ubuntu and Debian."
+host_require_root_and_os
+host_install_zabbly_repo
+host_install_packages --with-ovn-central
 
-# ---------------------------------------------------------------------------
-step "Zabbly Incus repository (${INCUS_CHANNEL})"
-KEY_FILE='/etc/apt/keyrings/zabbly.asc'
-if [[ ! -f "${KEY_FILE}" ]]; then
-  mkdir -p /etc/apt/keyrings
-  TMP_KEY="$(mktemp)"
-  curl -fsSL https://pkgs.zabbly.com/key.asc -o "${TMP_KEY}"
-  gpg --show-keys --with-colons "${TMP_KEY}" | grep -q "^fpr:::::::::${ZABBLY_KEY_FINGERPRINT}:" \
-    || { rm -f "${TMP_KEY}"; fail 'downloaded Zabbly key does not match the published fingerprint.'; }
-  install -m 0644 "${TMP_KEY}" "${KEY_FILE}"
-  rm -f "${TMP_KEY}"
-fi
-cat > /etc/apt/sources.list.d/zabbly-incus.sources <<EOF
-Enabled: yes
-Types: deb
-URIs: https://pkgs.zabbly.com/incus/${INCUS_CHANNEL}
-Suites: ${VERSION_CODENAME}
-Components: main
-Architectures: $(dpkg --print-architecture)
-Signed-By: ${KEY_FILE}
-EOF
-
-# ---------------------------------------------------------------------------
-step 'Packages'
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq incus incus-ui-canonical incus-extra zfsutils-linux ovn-central ovn-host \
-  nfs-common jq curl python3 python3-yaml
-
-# ---------------------------------------------------------------------------
-step "Local OVN control plane (encap ${OVN_ENCAP_IP})"
-systemctl enable --now ovn-central ovn-host
-ovs-vsctl set open_vswitch . \
-  external_ids:ovn-remote=unix:/run/ovn/ovnsb_db.sock \
-  external_ids:ovn-encap-type=geneve \
-  external_ids:ovn-encap-ip="${OVN_ENCAP_IP}"
+step 'Local OVN databases'
+systemctl enable --now ovn-central
 for _ in $(seq 1 30); do
   [[ -S /run/ovn/ovnnb_db.sock ]] && break
   sleep 1
 done
 [[ -S /run/ovn/ovnnb_db.sock ]] || fail 'OVN northbound socket /run/ovn/ovnnb_db.sock never appeared.'
+# Once clustered (cluster-enable.sh) the chassis talks to the databases over
+# TCP; keep that setting when this script is re-run.
+SOUTHBOUND="$(ovs-vsctl --if-exists get open_vswitch . external_ids:ovn-remote 2>/dev/null | tr -d '"' || true)"
+[[ "${SOUTHBOUND}" == tcp:* ]] || SOUTHBOUND='unix:/run/ovn/ovnsb_db.sock'
+host_configure_ovn_chassis "${SOUTHBOUND}" "${OVN_ENCAP_IP}"
+host_add_admin_user
 
-# ---------------------------------------------------------------------------
-step "Incus admin access for '${INCUS_ADMIN_USER}'"
-usermod -aG incus-admin "${INCUS_ADMIN_USER}"
-
-# ---------------------------------------------------------------------------
 if [[ "$(incus storage list -f json | jq 'length')" == '0' ]]; then
-  step "Storage device ${STORAGE_DEVICE}"
-  [[ -b "${STORAGE_DEVICE}" ]] || fail "storage device '${STORAGE_DEVICE}' does not exist."
-  # Installing zfsutils can auto-import a leftover pool from the same disk.
-  if zpool list -H -o name 2>/dev/null | grep -qx "${STORAGE_POOL}"; then
-    [[ "${WIPE_STORAGE_DEVICE}" == 'yes' ]] || fail "a ZFS pool named '${STORAGE_POOL}' is already imported. Re-run with --wipe-storage-device to destroy it."
-    zpool destroy -f "${STORAGE_POOL}"
-  fi
-  mapfile -t SIGNATURES < <(for dev in "${STORAGE_DEVICE}" "${STORAGE_DEVICE}"-part*; do
-    [[ -b "${dev}" ]] && wipefs -n "${dev}" 2>/dev/null | tail -n +2 | sed "s|^|${dev}: |"
-  done)
-  if (( ${#SIGNATURES[@]} > 0 )); then
-    printf '  %s\n' "${SIGNATURES[@]}"
-    [[ "${WIPE_STORAGE_DEVICE}" == 'yes' ]] || fail "${STORAGE_DEVICE} still has the signatures above. Re-run with --wipe-storage-device to erase them (destroys all data on it)."
-    for dev in "${STORAGE_DEVICE}"-part* "${STORAGE_DEVICE}"; do
-      [[ -b "${dev}" ]] && wipefs -a "${dev}"
-    done
-    partprobe "${STORAGE_DEVICE}" 2>/dev/null || true
-    udevadm settle
-  fi
+  host_prepare_storage_device "${WIPE_STORAGE_DEVICE}"
 
   step 'Initializing Incus (storage pool, uplink, default OVN network, default profile)'
   incus admin init --preseed <<EOF
@@ -188,32 +130,9 @@ else
   step 'Incus already initialized, skipping preseed'
 fi
 
-# ---------------------------------------------------------------------------
-if [[ -n "${NFS_BACKUP_SOURCE:-}" ]]; then
-  step "NFS backup mount ${NFS_BACKUP_SOURCE} -> ${NFS_BACKUP_DIR}"
-  mkdir -p "${NFS_BACKUP_DIR}"
-  if ! awk -v d="${NFS_BACKUP_DIR}" '$1 !~ /^#/ && $2 == d {found=1} END {exit !found}' /etc/fstab; then
-    printf '%s  %s  nfs  defaults,_netdev  0  0\n' "${NFS_BACKUP_SOURCE}" "${NFS_BACKUP_DIR}" >> /etc/fstab
-    systemctl daemon-reload
-  fi
-  awk -v s="${NFS_BACKUP_SOURCE}" -v d="${NFS_BACKUP_DIR}" '$1 !~ /^#/ && $1 == s && $2 != d {print $2}' /etc/fstab \
-    | while read -r OTHER; do echo "Warning: ${NFS_BACKUP_SOURCE} is also mounted at ${OTHER} by /etc/fstab; remove that entry once nothing uses it." >&2; done
-  mountpoint -q "${NFS_BACKUP_DIR}" || mount "${NFS_BACKUP_DIR}"
-else
-  step 'NFS_BACKUP_SOURCE not set, skipping the NFS backup mount'
-fi
+host_setup_nfs_mount
+host_install_backup_timer "${ROOT_DIR}"
 
-# ---------------------------------------------------------------------------
-if [[ "${ROOT_DIR}" == "${INSTALL_DIR}" ]]; then
-  step 'Nightly backup timer'
-  install -m 0644 "${ROOT_DIR}/backup/systemd/infnet-incus-backup.service" "${ROOT_DIR}/backup/systemd/infnet-incus-backup.timer" /etc/systemd/system/
-  systemctl daemon-reload
-  systemctl enable --now infnet-incus-backup.timer
-else
-  step "Repository is at ${ROOT_DIR}, not ${INSTALL_DIR}; skipping the backup timer (its units point at ${INSTALL_DIR})"
-fi
-
-# ---------------------------------------------------------------------------
 if [[ -n "${OIDC_ISSUER:-}" && -n "${OIDC_CLIENT_ID:-}" ]]; then
   step "Authentik OIDC (${OIDC_ISSUER})"
   curl -fsS -o /dev/null "${OIDC_ISSUER%/}/.well-known/openid-configuration" \
@@ -227,11 +146,8 @@ else
   step 'OIDC_ISSUER/OIDC_CLIENT_ID not set, skipping OIDC'
 fi
 
-# ---------------------------------------------------------------------------
-step 'Web UI branding'
-"${ROOT_DIR}/branding/apply-ui-branding.sh" --install-hook
+host_apply_branding "${ROOT_DIR}"
 
-# ---------------------------------------------------------------------------
 step 'Done'
 incus version
 incus network show "${UPLINK_NETWORK}" --project default | sed -n '/^config:/,/^description:/p'

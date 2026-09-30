@@ -5,6 +5,7 @@ Project-based workflow for a standalone (or clustered) [Incus](https://linuxcont
 This repository replaces `microcloud-maintenance`. It targets Incus from the [Zabbly packages](https://github.com/zabbly/incus), with a local OVN control plane in place of MicroOVN.
 
 - [Host setup](#host-setup)
+- [Clustering](#clustering)
 - [1:1 NAT](#11-nat)
 - [Firewall](#firewall)
 - [Authentik SSO](#authentik-sso)
@@ -35,7 +36,8 @@ Edit the **Host bootstrap** and **Authentik OIDC** sections of `.env`:
 | `INCUS_CHANNEL` | Zabbly channel: `stable` or `lts-7.0` - 1:1 NAT needs Incus 7.3+ or a 7.0 LTS release after 7.0.1 (see [1:1 NAT](#11-nat)) |
 | `INCUS_ADMIN_USER` | User added to `incus-admin` so it can run `incus` without sudo |
 | `STORAGE_DEVICE` | Whole disk for the `zpool` ZFS pool, as a `/dev/disk/by-id/` path |
-| `OVN_ENCAP_IP` | This host's management IP, used as the OVN Geneve tunnel endpoint |
+| `OVN_ENCAP_IP` | This host's management IP: OVN Geneve tunnel endpoint and, once clustered, its cluster address |
+| `OVN_CENTRAL_ADDRESS` | Joining hosts only: the host running the OVN databases (see [Clustering](#clustering)) |
 | `UPLINK_PARENT` | NIC wired to the public network (no IP configured on it) |
 | `UPLINK_IPV4_GATEWAY` | Upstream gateway with prefix, e.g. `172.31.232.1/21` |
 | `UPLINK_IPV4_OVN_RANGES` | Addresses the OVN routers take for their own uplink ports (one per project network, used for shared outbound NAT) |
@@ -138,6 +140,42 @@ incus image list -c lFtd
 ```
 
 Windows images: `distrobuilder repack-windows` (from `incus-extra`) injects the VirtIO drivers into a Windows ISO, the same job `lxd-imagebuilder repack-windows` did.
+
+---
+
+## Clustering
+
+A standalone host built by `setup-incus-host.sh` can grow into a cluster without touching its instances.
+
+### 1. Convert the existing host (once)
+
+```bash
+sudo host/cluster-enable.sh --add-member <new-host-short-name>
+```
+
+- Makes the OVN databases on this host listen on `OVN_ENCAP_IP` (northbound tcp/6641, southbound tcp/6642) and points this host's OVN chassis and Incus (`network.ovn.northbound_connection`) at that address instead of the local sockets.
+- Sets `cluster.https_address=<OVN_ENCAP_IP>:8443` (clustering can't use the `[::]` wildcard) and runs `incus cluster enable`.
+- Prints a single-use join token per `--add-member`. Later tokens: `incus cluster add <name>` on any member.
+
+### 2. Join each new host
+
+On the new host: clone the repository to `/opt/infnet-incus-scripts`, create its `.env` (its own `STORAGE_DEVICE`, `UPLINK_PARENT`, `OVN_ENCAP_IP`, plus `OVN_CENTRAL_ADDRESS` = the first host's `OVN_ENCAP_IP`), then:
+
+```bash
+sudo host/cluster-join.sh --token <token> [--wipe-storage-device]
+```
+
+It installs the same packages as `setup-incus-host.sh` (without the OVN databases), checks it can reach the cluster and OVN, points its OVN chassis at the cluster's databases, and joins with its own `zpool` disk and uplink NIC (`member_config`). Networks, projects, profiles and OIDC come from the cluster. It also sets up the NFS mount, backup timer and UI branding. The host must be clean: it refuses to join if Incus is already initialized there.
+
+### Requirements and caveats
+
+- **Network:** members reach the OVN host on tcp/6641-6642 and each other on tcp/8443 and udp/6081 (Geneve). Each member's `UPLINK_PARENT` must be on the same public L2 network. On VLAN 29, new hosts also need the same UniFi rules as the first (NFS, Authentik).
+- **OVN is a single point of failure:** only the first host runs the OVN databases. With three or more members, grow them into an OVN RAFT cluster.
+- **Storage stays per-host ZFS:** each instance lives on one member; `incus move <instance> --target <member>` copies it (no live migration), and an instance goes down with its host. Shared storage (Ceph) is what buys failover.
+- **Placement:** `create-instance.sh` lets Incus pick the member (the least loaded).
+- **Backups:** on a cluster, `backup-instances.sh` only backs up the instances on the member it runs on, so the timer installed on every member covers them all (or run one `--all-members` job instead).
+
+Tested end to end on two lab VMs: an existing instance and its 1:1 NAT kept working through `cluster-enable.sh`; after `cluster-join.sh`, a new instance landed on the new member with working 1:1 NAT (inbound, and outbound TCP from its public IP) and cross-member instance traffic.
 
 ---
 
@@ -292,7 +330,7 @@ To undo: `sudo rm /etc/apt/apt.conf.d/99-infnet-incus-ui-branding && sudo apt-ge
 - `backup/restore-instance.sh` restores an instance, including its 1:1 NAT.
 - `dns/sync-dns-records.sh` creates or corrects the Technitium record of every instance.
 - `lib/public-ip.sh` and `dns/technitium-dns.sh` are shared helpers, sourced by the scripts above.
-- `host/setup-incus-host.sh` builds the host ([Host setup](#host-setup)); `branding/apply-ui-branding.sh` brands the UI.
+- `host/setup-incus-host.sh` builds the host ([Host setup](#host-setup)); `host/cluster-enable.sh` and `host/cluster-join.sh` grow it into a cluster ([Clustering](#clustering)); `host/common.sh` holds their shared steps; `branding/apply-ui-branding.sh` brands the UI.
 
 `.env` stays at the repository root and is shared by every script. All scripts accept command-line arguments and fall back to interactive prompts for anything omitted.
 
