@@ -29,8 +29,8 @@ is refused while another instance still owns that public IP, since a second
 copy would share the original's NAT identity - delete the original first.
 
 Firewall ACLs referenced by the backup's NIC that no longer exist are
-recreated with the default inbound rule (RDP for Windows images, SSH
-otherwise); any extra rules the original ACL had must be added again.
+recreated with the default inbound rules (ICMP, plus RDP for Windows images
+or SSH otherwise); any extra rules the original ACL had must be added again.
 
 Options:
   --project-id ID       Numeric project ID that owns the backup.
@@ -268,7 +268,7 @@ fi
 for ACL_ENTRY in "${ACLS_TO_CREATE[@]}"; do
   IFS=$'\t' read -r ACL_NAME ACL_FAMILY <<< "${ACL_ENTRY}"
   read -r FW_PORT FW_SERVICE <<< "$(fw_default_rule "${ACL_FAMILY}")"
-  echo "Firewall ACL       : ${ACL_NAME} (recreated: inbound ${FW_SERVICE} tcp/${FW_PORT} only)"
+  echo "Firewall ACL       : ${ACL_NAME} (recreated: inbound ICMP and ${FW_SERVICE} tcp/${FW_PORT} only)"
 done
 
 if [[ -n "${CONFIRM_ARG}" ]]; then
@@ -293,7 +293,7 @@ fi
 
 for ACL_ENTRY in "${ACLS_TO_CREATE[@]}"; do
   IFS=$'\t' read -r ACL_NAME ACL_FAMILY <<< "${ACL_ENTRY}"
-  echo "Recreating firewall ACL '${ACL_NAME}' with its default inbound rule..."
+  echo "Recreating firewall ACL '${ACL_NAME}' with its default inbound rules..."
   fw_create_acl "${ACL_NAME}" "${PROJECT_NAME}" "${ACL_FAMILY}" || fail "unable to recreate firewall ACL '${ACL_NAME}'."
   ACLS_CREATED+=("${ACL_NAME}")
 done
@@ -321,5 +321,5 @@ if [[ -n "${NAT_PUBLIC}" ]]; then
   echo "Its 1:1 NAT (${NAT_PUBLIC}) is in place. DNS records were not touched; run dns/sync-dns-records.sh if needed."
 fi
 if (( ${#ACLS_CREATED[@]} > 0 )); then
-  echo "Recreated firewall ACL(s) ${ACLS_CREATED[*]} with only the default inbound rule; re-add any other ports the original allowed."
+  echo "Recreated firewall ACL(s) ${ACLS_CREATED[*]} with only the default inbound rules; re-add any other ports the original allowed."
 fi

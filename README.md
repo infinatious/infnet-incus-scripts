@@ -172,7 +172,7 @@ On a physical uplink, OVN answers ARP for the forward addresses itself (`ovn.ing
 
 | Direction | Default |
 |---|---|
-| Inbound | Rejected, except **SSH (tcp/22)** for Linux profiles or **RDP (tcp/3389)** for Windows profiles |
+| Inbound | Rejected, except **ICMP** (ping, for every instance) and **SSH (tcp/22)** for Linux profiles or **RDP (tcp/3389)** for Windows profiles |
 | Outbound | Allowed |
 
 OVN ACLs are stateful (replies to the instance's own connections get back in), and Incus automatically allows DHCP, DNS and ping to the network's router, so addressing and name resolution keep working. Instances without a public IP get the same ACL.
@@ -184,7 +184,7 @@ OVN ACLs are stateful (replies to the instance's own connections get back in), a
 
 Don't add ports on the *Forwards* screen: the forward already sends everything, and the ACL is what filters it.
 
-`delete-instance.sh` and `delete-project.sh` delete the ACL with the instance. `restore-instance.sh` recreates a missing ACL with only its default rule (RDP if the backup's `image.os` is Windows, SSH otherwise), so extra ports have to be re-added after a restore.
+`delete-instance.sh` and `delete-project.sh` delete the ACL with the instance. `restore-instance.sh` recreates a missing ACL with only its default rules (ICMP, plus RDP if the backup's `image.os` is Windows or SSH otherwise), so extra ports have to be re-added after a restore.
 
 The NIC keys the scripts set are `security.acls=<instance>`, `security.acls.default.ingress.action=reject` and `security.acls.default.egress.action=allow` (both defaults are `reject` in Incus, which would also block outbound traffic).
 
@@ -318,7 +318,7 @@ Creates the project (description `Project ID: 42`, which the other scripts use t
 - `--public-ip IP` gives the instance that 1:1 NAT address, `--public-ip random` a random free one from the uplink's `ipv4.routes`, and `--no-public-ip` none at all (it then only reaches out through its project's shared NAT address, and gets no DNS record). With none of these the script asks whether to assign a public IP and which one (blank = random); when it isn't run from a terminal it picks a random one. The address is checked before the instance is created.
 - `--description-suffix` appends text to the instance description. It is only prompted for when the script is run with no arguments at all.
 
-The instance is named `<env prefix><project id>-<service code>-<ct|vs><nn>` (e.g. `pd20-dnsag-ct01`). Once it has an address the script creates the instance's [firewall ACL](#firewall) (SSH or RDP inbound only), creates the [1:1 NAT](#11-nat) and registers `<instance-name>.<zone>` in Technitium (if configured) - both only when it has a public IP - and sets the description to `<public ip, or internal ip without one> <image alias> [suffix]`.
+The instance is named `<env prefix><project id>-<service code>-<ct|vs><nn>` (e.g. `pd20-dnsag-ct01`). Once it has an address the script creates the instance's [firewall ACL](#firewall) (ICMP plus SSH or RDP inbound only), creates the [1:1 NAT](#11-nat) and registers `<instance-name>.<zone>` in Technitium (if configured) - both only when it has a public IP - and sets the description to `<public ip, or internal ip without one> <image alias> [suffix]`.
 
 The internal address is read from the guest (needs the `incus-agent` in VMs) or, failing that, from the address OVN assigned to the NIC - so VMs without the agent, such as a fresh Windows install, still work.
 

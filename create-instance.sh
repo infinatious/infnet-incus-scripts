@@ -439,7 +439,7 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 read -r FW_PORT FW_SERVICE <<< "$(fw_default_rule "${PROFILE_FAMILY}")"
-echo "Creating firewall ACL '${INSTANCE_NAME}': inbound ${FW_SERVICE} (tcp/${FW_PORT}) only, outbound open..."
+echo "Creating firewall ACL '${INSTANCE_NAME}': inbound ICMP and ${FW_SERVICE} (tcp/${FW_PORT}) only, outbound open..."
 fw_create_acl "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PROFILE_FAMILY}" \
   || fail "unable to create firewall ACL '${INSTANCE_NAME}'. The instance exists without a firewall or public IP."
 mapfile -t FW_NIC_KEYS < <(fw_nic_keys "${INSTANCE_NAME}")
@@ -501,7 +501,7 @@ echo "RAM         : ${RAM_GIB}GiB"
 echo "Boot disk   : ${DISK_GIB}GiB"
 echo "Instance IP : ${INSTANCE_IPV4}"
 echo "Public IP   : ${PUBLIC_IPV4:-none}${PUBLIC_IPV4:+ (1:1 NAT)}"
-echo "Firewall    : ACL '${INSTANCE_NAME}' - inbound ${FW_SERVICE} (tcp/${FW_PORT}) only"
+echo "Firewall    : ACL '${INSTANCE_NAME}' - inbound ICMP and ${FW_SERVICE} (tcp/${FW_PORT}) only"
 echo "Description : ${DESCRIPTION_TEXT}"
 if [[ -n "${PUBLIC_IPV4}" ]] && technitium_configured; then
   echo "DNS         : ${DNS_FQDN} -> ${PUBLIC_IPV4}"
