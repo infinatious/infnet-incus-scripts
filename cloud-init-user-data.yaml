@@ -7,7 +7,10 @@ users:
   - default
   - name: kauffpc
     shell: /bin/bash
-    lock_passwd: true
+    # Not locked, just passwordless: sshd in some images runs with UsePAM no,
+    # which refuses even key logins to a locked ("!") account.
+    lock_passwd: false
+    hashed_passwd: "*"
     sudo: "ALL=(ALL) NOPASSWD:ALL"
     ssh_authorized_keys:
       - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCtIWE60jNhTAS/pcQBnV5MAMBzui9CNHhv3VUqVpBkCZq/c9Yt0OHzENq8FZkMWM7dQe/3+AFd+KCrRDTxPsnmNFIjw8lUUBMJgP6a9aKq8tidJi7+7ShboMHqkCGfALNXWeqIf67yG67o6SWJM+78k6f8Ie+2PCIKq/GRTpaH4mjOAHmRGH4ubiNAuL2CKRTk3MK6qyxaovCRA6WjyOSlb1qurZXQ1V/mh+Dqfo6aKMCNof9cdg5j6MneD8X7y+dG4Ge8Gy954n8ZggQwI9ifDxy71ok0GzKATMGb/O+Fwrt5wiMnMq6ct+HqP8XFYuxAl4ys4F3C68epPs4FbuwM5BWBXKOcpsKheG+I6EoXjfPDpqWioTgmNQQOP1v/Hzjw+GQNO8Bw3RK0snKZL9V5WWh9fe9Nnp532rhyTbWQIkUcskV84ToiGei3HyXdXiSy2aWoQlcM5+3dtILsw5czbW8Z9qULPexcR1DavVdFrI320bGzYu4J8T2LGoUGRqYWJapv2HQcZLDjJbXtFqm7PUKTRjXt483nSOqpXaPIhFlhEkm79zLtSAFA10P5LEmA8VwNXuPLKwtCdxj6SMLNwcXJ0djGniugoa2PHcO3g4zh38A5ZJBUx0JR30kJDxYxQ7VSeUHqvk9HBuJKVJ3LN0A6VOCfjcP76V2dT6nBJw== pk@inf-55135
@@ -15,6 +18,7 @@ users:
 ssh_pwauth: false
 
 packages:
+  - openssh-server
   - qemu-guest-agent
   - btop
   - git
