@@ -26,7 +26,7 @@ Get TOKEN on an existing member with `incus cluster add <this host's short
 hostname>` (or cluster-enable.sh --add-member). Everything cluster-wide
 (networks, projects, profiles, OIDC) comes from the cluster.
 
-This host's .env needs its own STORAGE_DEVICE, UPLINK_PARENT (on the same
+This host's .env needs its own STORAGE_DEVICE (or STORAGE_LOOP_SIZE), UPLINK_PARENT (on the same
 public network as the other members) and OVN_ENCAP_IP, plus the same
 OVN_CENTRAL_ADDRESSES as every other member. Hosts listed there run a copy of
 the OVN databases (use three); any others only run the OVN chassis.
@@ -66,13 +66,13 @@ source "${SCRIPT_DIR}/common.sh"
 : "${INCUS_CHANNEL:?INCUS_CHANNEL not set in ${ENV_FILE}}"
 : "${INCUS_ADMIN_USER:?INCUS_ADMIN_USER not set in ${ENV_FILE}}"
 : "${STORAGE_POOL:?STORAGE_POOL not set in ${ENV_FILE}}"
-: "${STORAGE_DEVICE:?STORAGE_DEVICE not set in ${ENV_FILE}}"
 : "${OVN_ENCAP_IP:?OVN_ENCAP_IP not set in ${ENV_FILE}}"
 : "${UPLINK_NETWORK:?UPLINK_NETWORK not set in ${ENV_FILE}}"
 : "${UPLINK_PARENT:?UPLINK_PARENT not set in ${ENV_FILE}}"
 : "${NFS_BACKUP_DIR:?NFS_BACKUP_DIR not set in ${ENV_FILE}}"
 
 host_require_root_and_os
+host_check_storage_settings
 host_load_ovn_central_addresses
 OVN_MEMBER=''
 host_is_ovn_central_member && OVN_MEMBER='yes'
@@ -154,8 +154,8 @@ cluster:
   member_config:
   - entity: storage-pool
     name: ${STORAGE_POOL}
-    key: source
-    value: ${STORAGE_DEVICE}
+    key: $(host_storage_key)
+    value: $(host_storage_value)
   - entity: network
     name: ${UPLINK_NETWORK}
     key: parent

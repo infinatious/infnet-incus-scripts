@@ -149,15 +149,53 @@ host_configure_ovn_central() {
   ovn-appctl -t /var/run/ovn/ovnnb_db.ctl cluster/status OVN_Northbound | grep -E '^(Role|Servers):|^    ' | sed 's/^/  /'
 }
 
+# The default project's network router address: the last address of
+# UPLINK_IPV4_OVN_RANGES, so project IDs (router .<id>) count up from the
+# bottom of the range without meeting it.
+host_default_router_address() {
+  python3 -c '
+import ipaddress, sys
+last = sys.argv[1].split(",")[-1].strip().split("-")[-1]
+print(ipaddress.IPv4Address(last))
+' "${UPLINK_IPV4_OVN_RANGES}"
+}
+
 host_add_admin_user() {
   step "Incus admin access for '${INCUS_ADMIN_USER}'"
   usermod -aG incus-admin "${INCUS_ADMIN_USER}"
 }
 
+# Checks the storage settings: either STORAGE_DEVICE (a whole disk or
+# partition) or, with STORAGE_DEVICE empty, STORAGE_LOOP_SIZE for a ZFS pool in
+# a loop file that Incus creates under /var/lib/incus/disks (for hosts whose
+# only disk holds the OS).
+host_check_storage_settings() {
+  if [[ -z "${STORAGE_DEVICE:-}" ]]; then
+    [[ "${STORAGE_LOOP_SIZE:-}" =~ ^[0-9]+(GiB|TiB)$ ]] \
+      || fail 'set STORAGE_DEVICE, or leave it empty and set STORAGE_LOOP_SIZE (e.g. 700GiB) for a loop-file pool.'
+  fi
+}
+
+# The storage pool's member-specific config key and value: the device, or the
+# loop file's size.
+host_storage_key() { [[ -n "${STORAGE_DEVICE:-}" ]] && echo source || echo size; }
+host_storage_value() { [[ -n "${STORAGE_DEVICE:-}" ]] && echo "${STORAGE_DEVICE}" || echo "${STORAGE_LOOP_SIZE}"; }
+
 # Checks STORAGE_DEVICE is free for the storage pool, erasing old partition
-# and ZFS signatures when wipe=yes. Destroys everything on the device.
+# and ZFS signatures when wipe=yes. Destroys everything on the device. For a
+# loop-file pool it checks the filesystem has room instead.
 host_prepare_storage_device() {
-  local wipe="$1" dev signatures=()
+  local wipe="$1" dev signatures=() free_gib want_gib
+  if [[ -z "${STORAGE_DEVICE:-}" ]]; then
+    step "Storage: ${STORAGE_LOOP_SIZE} loop file under /var/lib/incus/disks"
+    mkdir -p /var/lib/incus
+    free_gib="$(df -BG --output=avail /var/lib/incus | tail -n1 | tr -dc '0-9')"
+    want_gib="${STORAGE_LOOP_SIZE%GiB}"
+    [[ "${STORAGE_LOOP_SIZE}" == *TiB ]] && want_gib=$(( ${STORAGE_LOOP_SIZE%TiB} * 1024 ))
+    (( free_gib > want_gib )) \
+      || fail "/var/lib/incus has ${free_gib} GiB free, not enough for a ${STORAGE_LOOP_SIZE} loop file."
+    return 0
+  fi
   step "Storage device ${STORAGE_DEVICE}"
   [[ -b "${STORAGE_DEVICE}" ]] || fail "storage device '${STORAGE_DEVICE}' does not exist."
   # Installing zfsutils can auto-import a leftover pool from the same disk.

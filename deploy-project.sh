@@ -206,8 +206,9 @@ fi
 
 [[ -n "${PROJECT_NAME}" ]] || fail 'project name cannot be empty.'
 [[ "${PROJECT_ID}" =~ ^[0-9]+$ ]] || fail 'project ID must be numeric.'
-# .0, .1 (gateway) and .255 of the router /24 are unusable and .254 belongs to
-# the default project's network.
+# .0, .1 (gateway) and .255 of the router /24 are unusable. The router address
+# must also sit inside the uplink's ipv4.ovn.ranges (checked below), whose last
+# address belongs to the default project's network.
 (( PROJECT_ID >= 2 && PROJECT_ID <= 253 )) || fail 'project ID must be between 2 and 253.'
 
 NETWORK_NAME="${PROJECT_NAME}"
@@ -219,6 +220,17 @@ command -v incus >/dev/null 2>&1 || fail 'incus command not found in PATH.'
 [[ -f "${CLOUDBASE_INIT_FILE}" ]] || fail "cloudbase-init file '${CLOUDBASE_INIT_FILE}' not found."
 incus storage show "${STORAGE_POOL}" >/dev/null 2>&1 || fail "storage pool '${STORAGE_POOL}' was not found."
 incus network show "${UPLINK_NETWORK}" --project default >/dev/null 2>&1 || fail "uplink network '${UPLINK_NETWORK}' was not found."
+OVN_RANGES="$(incus network get "${UPLINK_NETWORK}" ipv4.ovn.ranges --project default 2>/dev/null)"
+python3 -c '
+import ipaddress, sys
+ip = ipaddress.IPv4Address(sys.argv[1])
+for r in sys.argv[2].split(","):
+    lo, _, hi = r.strip().partition("-")
+    if ipaddress.IPv4Address(lo) <= ip <= ipaddress.IPv4Address(hi or lo):
+        sys.exit(0)
+sys.exit(1)
+' "${ROUTER_IPV4}" "${OVN_RANGES}" \
+  || fail "router address ${ROUTER_IPV4} (project ID ${PROJECT_ID}) is outside uplink '${UPLINK_NETWORK}' ipv4.ovn.ranges (${OVN_RANGES}); pick a lower project ID."
 nat_used_addresses "${UPLINK_NETWORK}" | grep -qxF "${ROUTER_IPV4}" \
   && fail "router address ${ROUTER_IPV4} is already used on uplink '${UPLINK_NETWORK}' (is project ID ${PROJECT_ID} taken?)."
 [[ -n "$(incus network get "${UPLINK_NETWORK}" ipv4.routes --project default 2>/dev/null)" ]] \

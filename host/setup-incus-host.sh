@@ -30,7 +30,8 @@ Options:
   --wipe-storage-device  Erase existing partition/ZFS signatures on
                          STORAGE_DEVICE before creating the pool. Needed when
                          the disk still carries an old (e.g. MicroCloud/LXD)
-                         pool. Destroys everything on that disk.
+                         pool. Destroys everything on that disk. Not used for
+                         a loop-file pool (STORAGE_LOOP_SIZE).
   --help                 Show this help message.
 EOF
 }
@@ -53,7 +54,6 @@ source "${SCRIPT_DIR}/common.sh"
 : "${INCUS_CHANNEL:?INCUS_CHANNEL not set in ${ENV_FILE}}"
 : "${INCUS_ADMIN_USER:?INCUS_ADMIN_USER not set in ${ENV_FILE}}"
 : "${STORAGE_POOL:?STORAGE_POOL not set in ${ENV_FILE}}"
-: "${STORAGE_DEVICE:?STORAGE_DEVICE not set in ${ENV_FILE}}"
 : "${OVN_ENCAP_IP:?OVN_ENCAP_IP not set in ${ENV_FILE}}"
 : "${UPLINK_NETWORK:?UPLINK_NETWORK not set in ${ENV_FILE}}"
 : "${UPLINK_PARENT:?UPLINK_PARENT not set in ${ENV_FILE}}"
@@ -66,6 +66,8 @@ source "${SCRIPT_DIR}/common.sh"
 : "${NFS_BACKUP_DIR:?NFS_BACKUP_DIR not set in ${ENV_FILE}}"
 
 host_require_root_and_os
+host_check_storage_settings
+DEFAULT_ROUTER_IPV4="$(host_default_router_address)" || fail "UPLINK_IPV4_OVN_RANGES '${UPLINK_IPV4_OVN_RANGES}' is not a valid range."
 host_install_zabbly_repo
 host_install_packages --with-ovn-central
 
@@ -108,12 +110,12 @@ networks:
     ipv4.address: ${IPV4_SUBNET_PREFIX}.0.1/24
     ipv4.nat: 'true'
     ipv6.address: none
-    volatile.network.ipv4.address: ${PROJECT_NAT_IPV4_PREFIX}.254
+    volatile.network.ipv4.address: ${DEFAULT_ROUTER_IPV4}
 storage_pools:
 - name: ${STORAGE_POOL}
   driver: zfs
   config:
-    source: ${STORAGE_DEVICE}
+    $(host_storage_key): ${STORAGE_DEVICE:-${STORAGE_LOOP_SIZE}}
 profiles:
 - name: default
   devices:
