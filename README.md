@@ -281,6 +281,8 @@ To undo: `sudo rm /etc/apt/apt.conf.d/99-infnet-incus-ui-branding && sudo apt-ge
 
 ## Scripts
 
+`./start.sh` is a main menu for everything below: it lists the scripts, runs the chosen one without arguments (so it prompts for what it needs), and returns to the menu. It also offers dry runs of the backup and DNS sync, and the host maintenance scripts (with `sudo`; host setup never wipes the disk from the menu).
+
 - `deploy-project.sh` creates a project, its OVN network, and Linux/Windows profiles.
 - `create-instance.sh` creates an instance from the chosen profile and image, and maps a public IP to it with 1:1 NAT.
 - `resize-instance.sh` changes CPU, RAM and root disk size.
