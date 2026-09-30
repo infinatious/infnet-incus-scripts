@@ -31,6 +31,7 @@ MENU=(
   'Resize an instance'                      'resize-instance.sh'
   'Delete an instance'                      'delete-instance.sh'
   'Delete a project'                        'delete-project.sh'
+  'Manage images and aliases'               'manage-images.sh'
   'Back up instances now'                   'backup/backup-instances.sh'
   'Back up instances (dry run)'             'backup/backup-instances.sh --dry-run'
   'Restore an instance from backup'         'backup/restore-instance.sh'

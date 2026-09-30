@@ -326,6 +326,7 @@ To undo: `sudo rm /etc/apt/apt.conf.d/99-infnet-incus-ui-branding && sudo apt-ge
 - `resize-instance.sh` changes CPU, RAM and root disk size.
 - `delete-instance.sh` deletes an instance and releases its public IP and DNS record.
 - `delete-project.sh` deletes a project's profiles, network and the project itself (and optionally its instances).
+- `manage-images.sh` lists the `default` project's images (the ones every project launches from), imports new ones from the `images:` server, adds/renames/removes aliases, and deletes images.
 - `backup/backup-instances.sh` exports instances to NFS. Runs nightly from `infnet-incus-backup.timer`.
 - `backup/restore-instance.sh` restores an instance, including its 1:1 NAT.
 - `dns/sync-dns-records.sh` creates or corrects the Technitium record of every instance.
@@ -557,9 +558,5 @@ The [MicroCloud Vault](https://github.com/infinatious/microcloud-backup-manager)
 
 ## Notes
 
-- Image aliases:
-  ```
-  incus image list local: -c lFd
-  incus image alias create NAME FINGERPRINT --project default
-  ```
+- Images and aliases: `./manage-images.sh` (or `incus image alias create NAME FINGERPRINT --project default`).
 - The image picker filters by profile family: Linux lists images whose aliases don't contain `win`, Windows lists only those that do.
