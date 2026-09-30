@@ -27,6 +27,7 @@ esac
 # Label, then the command (relative to the repository) - one menu entry each.
 MENU=(
   'Deploy a new project'                    'deploy-project.sh'
+  'Add missing profiles to a project'       'deploy-project.sh --add-missing-profiles'
   'Create an instance'                      'create-instance.sh'
   'Resize an instance'                      'resize-instance.sh'
   'Delete an instance'                      'delete-instance.sh'

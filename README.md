@@ -1,6 +1,6 @@
 # INFNET Incus scripts
 
-Project-based workflow for a standalone (or clustered) [Incus](https://linuxcontainers.org/incus/) host: every project gets its own OVN network and Linux/Windows profiles, every instance gets a public IPv4 through 1:1 NAT, a Technitium DNS record, and nightly backups to NFS.
+Project-based workflow for a standalone (or clustered) [Incus](https://linuxcontainers.org/incus/) host: every project gets its own OVN network and Linux/Windows/Docker profiles, every instance gets a public IPv4 through 1:1 NAT, a Technitium DNS record, and nightly backups to NFS.
 
 This repository replaces `microcloud-maintenance`. It targets Incus from the [Zabbly packages](https://github.com/zabbly/incus), with a local OVN control plane in place of MicroOVN.
 
@@ -336,7 +336,7 @@ sudo ./branding/uefi-logo.sh revert   # back to the stock firmware
 
 `./start.sh` is a main menu for everything below: it lists the scripts, runs the chosen one without arguments (so it prompts for what it needs), and returns to the menu. It also offers dry runs of the backup and DNS sync, and the host maintenance scripts (with `sudo`; host setup never wipes the disk from the menu).
 
-- `deploy-project.sh` creates a project, its OVN network, and Linux/Windows profiles.
+- `deploy-project.sh` creates a project, its OVN network, and Linux/Windows/Docker profiles.
 - `create-instance.sh` creates an instance from the chosen profile and image, and maps a public IP to it with 1:1 NAT.
 - `resize-instance.sh` changes CPU, RAM and root disk size.
 - `delete-instance.sh` deletes an instance and releases its public IP and DNS record.
@@ -356,7 +356,19 @@ sudo ./branding/uefi-logo.sh revert   # back to the stock firmware
 ./deploy-project.sh --project-name demo --project-id 42
 ```
 
-Creates the project (description `Project ID: 42`, which the other scripts use to find it), an OVN network `demo` on `<IPV4_SUBNET_PREFIX>.42.1/24` behind `UPLINK_NETWORK`, and the profiles `demo-linux` (1 CPU, 2 GiB, 20 GiB, cloud-init from `cloud-init-user-data.yaml`) and `demo-win` (2 CPU, 4 GiB, 64 GiB, cloudbase-init from `cloudbase-init-user-data.yaml`). It warns if the uplink has no `ipv4.routes`, since instances in the project couldn't get public IPs.
+Creates the project (description `Project ID: 42`, which the other scripts use to find it), an OVN network `demo` on `<IPV4_SUBNET_PREFIX>.42.1/24` behind `UPLINK_NETWORK`, and the profiles `demo-linux` (1 CPU, 2 GiB, 20 GiB, cloud-init from `cloud-init-user-data.yaml`) `demo-win` (2 CPU, 4 GiB, 64 GiB, cloudbase-init from `cloudbase-init-user-data.yaml`) and `demo-docker` (see [Docker profile](#docker-profile)). It warns if the uplink has no `ipv4.routes`, since instances in the project couldn't get public IPs.
+
+Projects created before a profile was added (e.g. the Docker one) get it with:
+
+```bash
+./deploy-project.sh --project-name demo --add-missing-profiles
+```
+
+It creates whichever of the three standard profiles the project lacks and leaves the existing ones untouched.
+
+##### Docker profile
+
+`demo-docker` is for running Docker inside a system container rather than a full VM: 2 CPU, 4 GiB, 40 GiB, `security.nesting=true` (so dockerd can create its own namespaces, cgroups and overlay mounts while the container stays unprivileged), and the Linux cloud-init payload plus Docker Engine and the Compose plugin from Docker's own repos (`get.docker.com` on Debian/Ubuntu/Fedora, the RHEL repo on AlmaLinux/Rocky) with every user in the `docker` group. The payload is generated from `cloud-init-user-data.yaml` when the profile is created, so users and keys stay defined in one place; re-create the profile after editing that file. `create-instance.sh --profile-type docker` offers container images only and opens SSH like any Linux instance; published container ports still need an ingress rule on the instance's ACL (see [Firewall](#firewall)).
 
 #### `create-instance.sh`
 
@@ -368,7 +380,7 @@ Creates the project (description `Project ID: 42`, which the other scripts use t
 - `--project-id` selects the target project by numeric project ID.
 - `--environment` uses `p`, `t`, `q`, or `d` (Prod, Test, QA, Dev).
 - `--service-code` must be exactly five alphanumeric characters.
-- `--profile-type` is `linux` or `win`.
+- `--profile-type` is `linux`, `win` or `docker`.
 - `--cpu`, `--ram`, and `--disk` override the profile defaults.
 - `--image-index` selects the image from the numbered filtered list; `--image-alias` selects it by exact alias.
 - `--public-ip IP` gives the instance that 1:1 NAT address, `--public-ip random` a random free one from the uplink's `ipv4.routes`, and `--no-public-ip` none at all (it then only reaches out through its project's shared NAT address, and gets no DNS record). With none of these the script asks whether to assign a public IP and which one (blank = random); when it isn't run from a terminal it picks a random one. The address is checked before the instance is created.
@@ -575,4 +587,4 @@ The [MicroCloud Vault](https://github.com/infinatious/microcloud-backup-manager)
 
 - Images and aliases: `./manage-images.sh` (or `incus image alias create NAME FINGERPRINT --project default`).
 - The Windows Server 2025 image (`win2025`) was built with [antifob/incus-windows](https://github.com/antifob/incus-windows). Like other images that can't load the incus-agent over a shared filesystem, it's marked `requirements.cdrom_agent`, so `create-instance.sh` adds the `agent:config` disk device those VMs need before starting them.
-- The image picker filters by profile family: Linux lists images whose aliases don't contain `win`, Windows lists only those that do.
+- The image picker filters by profile family: Linux lists images whose aliases don't contain `win`, Windows lists only those that do, and Docker lists the Linux container images.

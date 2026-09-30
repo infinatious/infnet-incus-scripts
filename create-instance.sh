@@ -19,7 +19,8 @@ Options:
   --project-id ID          Numeric project ID to select the project.
   --environment ENV        Environment code: p, t, q, or d.
   --service-code CODE      Five-character service code (alphanumeric).
-  --profile-type TYPE      Profile family: linux or win.
+  --profile-type TYPE      Profile family: linux, win or docker (Linux container
+                           with Docker and Compose preinstalled).
   --cpu N                  Override CPU core count.
   --ram GIB                Override RAM size in GiB.
   --disk GIB               Override boot disk size in GiB.
@@ -200,7 +201,7 @@ NETWORK_NAME="${PROJECT_NAME}"
 if [[ -n "${PROFILE_TYPE_ARG}" ]]; then
   PROFILE_TYPE="${PROFILE_TYPE_ARG}"
 else
-  read -r -p 'Profile type to use (linux or win): ' PROFILE_TYPE
+  read -r -p 'Profile type to use (linux, win or docker): ' PROFILE_TYPE
 fi
 case "${PROFILE_TYPE}" in
   linux|Linux|l)
@@ -211,13 +212,18 @@ case "${PROFILE_TYPE}" in
     PROFILE_NAME="${PROJECT_NAME}-win"
     PROFILE_FAMILY='win'
     ;;
+  docker|Docker|d)
+    PROFILE_NAME="${PROJECT_NAME}-docker"
+    PROFILE_FAMILY='linux'
+    ;;
   *)
-    fail 'profile type must be linux or win.'
+    fail 'profile type must be linux, win or docker.'
     ;;
 esac
 
 incus project show "${PROJECT_NAME}" >/dev/null 2>&1 || fail "project '${PROJECT_NAME}' does not exist."
-incus profile show "${PROFILE_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || fail "profile '${PROFILE_NAME}' does not exist in project '${PROJECT_NAME}'."
+incus profile show "${PROFILE_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 \
+  || fail "profile '${PROFILE_NAME}' does not exist in project '${PROJECT_NAME}' (add it with: ./deploy-project.sh --project-name ${PROJECT_NAME} --add-missing-profiles)."
 PROFILE_SHOW_FILE="$(mktemp)"
 DESC_FILE=''
 cleanup() {
@@ -351,17 +357,13 @@ esac
 
 PROJECT_ID_STR="${PROJECT_ID}"
 
+# Docker relies on security.nesting, which only applies to containers.
 case "${PROFILE_TYPE}" in
-  linux|Linux|l)
-    mapfile -t IMAGE_ROWS < <(incus image list --project default --format json | jq -r '.[] | select(((.aliases | map(.name // "") | join(" ")) | test("win"; "i")) | not) | [(.aliases[0].name // "-"), .fingerprint[0:12], .type, .architecture, (.description // "")] | @tsv')
-    ;;
-  win|Windows|w)
-    mapfile -t IMAGE_ROWS < <(incus image list --project default --format json | jq -r '.[] | select((.aliases | map(.name // "") | join(" ")) | test("win"; "i")) | [(.aliases[0].name // "-"), .fingerprint[0:12], .type, .architecture, (.description // "")] | @tsv')
-    ;;
-  *)
-    fail 'profile type must be linux or win.'
-    ;;
+  linux|Linux|l) IMAGE_FILTER='((.aliases | map(.name // "") | join(" ")) | test("win"; "i")) | not' ;;
+  win|Windows|w) IMAGE_FILTER='(.aliases | map(.name // "") | join(" ")) | test("win"; "i")' ;;
+  docker|Docker|d) IMAGE_FILTER='.type == "container" and (((.aliases | map(.name // "") | join(" ")) | test("win"; "i")) | not)' ;;
 esac
+mapfile -t IMAGE_ROWS < <(incus image list --project default --format json | jq -r ".[] | select(${IMAGE_FILTER}) | [(.aliases[0].name // \"-\"), .fingerprint[0:12], .type, .architecture, (.description // \"\")] | @tsv")
 (( ${#IMAGE_ROWS[@]} > 0 )) || fail "no matching images found for profile '${PROFILE_NAME}'."
 
 echo 'Available images:'
