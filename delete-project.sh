@@ -44,6 +44,9 @@ source "${DNS_LIB_FILE}"
 [[ -f "${SCRIPT_DIR}/lib/public-ip.sh" ]] || fail "${SCRIPT_DIR}/lib/public-ip.sh not found."
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/public-ip.sh"
+[[ -f "${SCRIPT_DIR}/lib/firewall.sh" ]] || fail "${SCRIPT_DIR}/lib/firewall.sh not found."
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/firewall.sh"
 
 PROJECT_ID_ARG=''
 DELETE_INSTANCES_ARG=''
@@ -124,6 +127,7 @@ if [[ -n "${INSTANCE_LIST}" ]]; then
         run nat_release "${PROJECT_NAME}" "${NETWORK_NAME}" "${PUBLIC_IP}"
         dns_deregister_record "${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}" "${PUBLIC_IP}" || true
       fi
+      run fw_delete_acl "${INSTANCE_NAME}" "${PROJECT_NAME}"
     done < <(printf '%s\n' "${INSTANCE_LIST}" | sed '/^$/d')
   else
     echo "Project '${PROJECT_NAME}' still has instances:" >&2
@@ -146,6 +150,14 @@ if (( ${#PROFILE_NAMES[@]} > 0 )); then
 else
   echo "No project profiles found, skipping."
 fi
+
+# Any ACLs left over (e.g. created by hand) would block deleting the project.
+mapfile -t ACL_NAMES < <(incus network acl list --project "${PROJECT_NAME}" -f json 2>/dev/null | jq -r '.[].name')
+for ACL_NAME in "${ACL_NAMES[@]}"; do
+  [[ -n "${ACL_NAME}" ]] || continue
+  echo "Deleting network ACL '${ACL_NAME}'..."
+  run incus network acl delete "${ACL_NAME}" --project "${PROJECT_NAME}"
+done
 
 if incus network show "${NETWORK_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1; then
   echo "Deleting network '${NETWORK_NAME}'..."

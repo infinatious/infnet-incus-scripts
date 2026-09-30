@@ -49,6 +49,9 @@ source "${DNS_LIB_FILE}"
 [[ -f "${SCRIPT_DIR}/lib/public-ip.sh" ]] || fail "${SCRIPT_DIR}/lib/public-ip.sh not found."
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/public-ip.sh"
+[[ -f "${SCRIPT_DIR}/lib/firewall.sh" ]] || fail "${SCRIPT_DIR}/lib/firewall.sh not found."
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/firewall.sh"
 
 PROJECT_ID_ARG=''
 INSTANCE_INDEX_ARG=''
@@ -177,6 +180,9 @@ if [[ -n "${PUBLIC_IP}" ]]; then
 else
   echo "No public IP found on instance '${INSTANCE_NAME}', skipping 1:1 NAT cleanup."
 fi
+
+echo "Deleting firewall ACL '${INSTANCE_NAME}' (if any)..."
+run fw_delete_acl "${INSTANCE_NAME}" "${PROJECT_NAME}"
 
 echo
 echo 'Deletion complete.'

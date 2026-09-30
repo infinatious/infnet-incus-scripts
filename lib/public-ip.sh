@@ -142,13 +142,16 @@ nat_set_nic() {
 # listings show which machine owns each public IP.
 # The internal address is pinned on the NIC so the forward target survives
 # restarts; it is the instance's current address, so nothing is renumbered.
+# Any extra arguments are more NIC keys (e.g. the firewall ACL) applied in the
+# same device update.
 nat_attach() {
   local instance="$1" project="$2" network="$3" public_ip="$4" internal_ip="$5"
+  shift 5
 
   incus network forward create "${network}" "${public_ip}" target_address="${internal_ip}" \
-    --description "${instance}" --project "${project}" || return 1
+    --description "${instance}" --project "${project}" </dev/null || return 1
 
-  if ! nat_set_nic "${instance}" "${project}" ipv4.address="${internal_ip}" ipv4.address.external="${public_ip}"; then
+  if ! nat_set_nic "${instance}" "${project}" ipv4.address="${internal_ip}" ipv4.address.external="${public_ip}" "$@"; then
     echo "Error: unable to set ${PUBLIC_IP_NIC} external address on '${instance}'; removing forward ${public_ip}." >&2
     incus network forward delete "${network}" "${public_ip}" --project "${project}" >/dev/null 2>&1 || true
     return 1

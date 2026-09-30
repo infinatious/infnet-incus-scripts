@@ -28,6 +28,10 @@ recreated before the import (Incus refuses the import otherwise). The restore
 is refused while another instance still owns that public IP, since a second
 copy would share the original's NAT identity - delete the original first.
 
+Firewall ACLs referenced by the backup's NIC that no longer exist are
+recreated with the default inbound rule (RDP for Windows images, SSH
+otherwise); any extra rules the original ACL had must be added again.
+
 Options:
   --project-id ID       Numeric project ID that owns the backup.
   --instance-name NAME  Original instance name; used to locate its backups.
@@ -58,6 +62,9 @@ source "${ENV_FILE}"
 [[ -f "${ROOT_DIR}/lib/public-ip.sh" ]] || fail "${ROOT_DIR}/lib/public-ip.sh not found."
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/public-ip.sh"
+[[ -f "${ROOT_DIR}/lib/firewall.sh" ]] || fail "${ROOT_DIR}/lib/firewall.sh not found."
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/firewall.sh"
 
 PROJECT_ID_ARG=''
 INSTANCE_NAME_ARG=''
@@ -201,6 +208,39 @@ for nic in walk(data):
     print("\t".join([nic["ipv4.address.external"], nic.get("ipv4.address", ""), nic.get("network", "")]))
     break
 ')"
+# Firewall ACLs the NIC references must exist before the import too.
+mapfile -t BACKUP_ACLS < <(tar -xOf "${BACKUP_FILE}" --occurrence=1 backup/index.yaml 2>/dev/null | python3 -c '
+import sys, yaml
+def walk(node):
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from walk(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from walk(value)
+try:
+    data = yaml.safe_load(sys.stdin) or {}
+except yaml.YAMLError:
+    sys.exit(0)
+family = "linux"
+acls = []
+for node in walk(data):
+    if "windows" in str(node.get("image.os", "")).lower():
+        family = "win"
+    for acl in str(node.get("security.acls", "")).split(","):
+        if acl.strip() and acl.strip() not in acls:
+            acls.append(acl.strip())
+for acl in acls:
+    print(acl + "\t" + family)
+')
+ACLS_TO_CREATE=()
+for ACL_ENTRY in "${BACKUP_ACLS[@]}"; do
+  IFS=$'\t' read -r ACL_NAME ACL_FAMILY <<< "${ACL_ENTRY}"
+  incus network acl show "${ACL_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || ACLS_TO_CREATE+=("${ACL_NAME}"$'\t'"${ACL_FAMILY}")
+done
+ACLS_CREATED=()
+
 NAT_PUBLIC=''
 NAT_FORWARD_CREATED=''
 if [[ -n "${NAT_INFO}" ]]; then
@@ -225,6 +265,11 @@ echo "Restored as        : ${TARGET_NAME}"
 if [[ -n "${NAT_PUBLIC}" ]]; then
   echo "Public IP          : ${NAT_PUBLIC} -> ${NAT_INTERNAL} (1:1 NAT on '${NAT_NETWORK}')"
 fi
+for ACL_ENTRY in "${ACLS_TO_CREATE[@]}"; do
+  IFS=$'\t' read -r ACL_NAME ACL_FAMILY <<< "${ACL_ENTRY}"
+  read -r FW_PORT FW_SERVICE <<< "$(fw_default_rule "${ACL_FAMILY}")"
+  echo "Firewall ACL       : ${ACL_NAME} (recreated: inbound ${FW_SERVICE} tcp/${FW_PORT} only)"
+done
 
 if [[ -n "${CONFIRM_ARG}" ]]; then
   CONFIRM='yes'
@@ -237,7 +282,7 @@ if [[ -n "${NAT_PUBLIC}" ]]; then
   if [[ "${NAT_FORWARD_CREATED}" == 'pending' ]]; then
     echo "Recreating network forward ${NAT_PUBLIC} -> ${NAT_INTERNAL}..."
     run incus network forward create "${NAT_NETWORK}" "${NAT_PUBLIC}" target_address="${NAT_INTERNAL}" \
-      --description "${TARGET_NAME}" --project "${PROJECT_NAME}"
+      --description "${TARGET_NAME}" --project "${PROJECT_NAME}" </dev/null
     NAT_FORWARD_CREATED='yes'
   else
     echo "Reusing existing network forward ${NAT_PUBLIC}, pointing it at ${NAT_INTERNAL}..."
@@ -246,11 +291,21 @@ if [[ -n "${NAT_PUBLIC}" ]]; then
   fi
 fi
 
+for ACL_ENTRY in "${ACLS_TO_CREATE[@]}"; do
+  IFS=$'\t' read -r ACL_NAME ACL_FAMILY <<< "${ACL_ENTRY}"
+  echo "Recreating firewall ACL '${ACL_NAME}' with its default inbound rule..."
+  fw_create_acl "${ACL_NAME}" "${PROJECT_NAME}" "${ACL_FAMILY}" || fail "unable to recreate firewall ACL '${ACL_NAME}'."
+  ACLS_CREATED+=("${ACL_NAME}")
+done
+
 echo "Importing '${BACKUP_FILE}' as '${TARGET_NAME}' into project '${PROJECT_NAME}'..."
 if ! incus import "${BACKUP_FILE}" "${TARGET_NAME}" --project "${PROJECT_NAME}"; then
   if [[ "${NAT_FORWARD_CREATED}" == 'yes' ]]; then
     incus network forward delete "${NAT_NETWORK}" "${NAT_PUBLIC}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
   fi
+  for ACL_NAME in "${ACLS_CREATED[@]}"; do
+    incus network acl delete "${ACL_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
+  done
   fail "command failed: incus import ${BACKUP_FILE} ${TARGET_NAME} --project ${PROJECT_NAME}"
 fi
 [[ -z "${NAT_PUBLIC}" ]] || run incus config set "${TARGET_NAME}" "${PUBLIC_IP_CONFIG_KEY}=${NAT_PUBLIC}" --project "${PROJECT_NAME}"
@@ -264,4 +319,7 @@ echo "The instance was imported stopped. Start it with:"
 echo "  incus start ${TARGET_NAME} --project ${PROJECT_NAME}"
 if [[ -n "${NAT_PUBLIC}" ]]; then
   echo "Its 1:1 NAT (${NAT_PUBLIC}) is in place. DNS records were not touched; run dns/sync-dns-records.sh if needed."
+fi
+if (( ${#ACLS_CREATED[@]} > 0 )); then
+  echo "Recreated firewall ACL(s) ${ACLS_CREATED[*]} with only the default inbound rule; re-add any other ports the original allowed."
 fi

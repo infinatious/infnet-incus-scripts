@@ -64,6 +64,9 @@ source "${DNS_LIB_FILE}"
 [[ -f "${NAT_LIB_FILE}" ]] || fail "${NAT_LIB_FILE} not found."
 # shellcheck source=/dev/null
 source "${NAT_LIB_FILE}"
+[[ -f "${SCRIPT_DIR}/lib/firewall.sh" ]] || fail "${SCRIPT_DIR}/lib/firewall.sh not found."
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/firewall.sh"
 
 ARGS_PROVIDED=$#
 
@@ -202,9 +205,11 @@ fi
 case "${PROFILE_TYPE}" in
   linux|Linux|l)
     PROFILE_NAME="${PROJECT_NAME}-linux"
+    PROFILE_FAMILY='linux'
     ;;
   win|Windows|w)
     PROFILE_NAME="${PROJECT_NAME}-win"
+    PROFILE_FAMILY='win'
     ;;
   *)
     fail 'profile type must be linux or win.'
@@ -413,7 +418,9 @@ fi
 LAUNCH_ARGS+=(-d root,size="${DISK_GIB}GiB")
 
 echo "Creating instance '${INSTANCE_NAME}' from image ${SELECTED_ALIAS} (${SELECTED_FP12})..."
-run incus "${LAUNCH_ARGS[@]}"
+# incus create/launch commands read YAML from stdin when it isn't a terminal,
+# so they get </dev/null to never block on (or swallow) a pipe or ssh channel.
+run incus "${LAUNCH_ARGS[@]}" </dev/null
 
 echo 'Waiting for IPv4 address...'
 # The guest-reported address needs the incus-agent; VMs without it (e.g. a
@@ -431,18 +438,26 @@ for _ in $(seq 1 60); do
   [[ -n "${INSTANCE_IPV4}" ]] && break
   sleep 2
 done
+read -r FW_PORT FW_SERVICE <<< "$(fw_default_rule "${PROFILE_FAMILY}")"
+echo "Creating firewall ACL '${INSTANCE_NAME}': inbound ${FW_SERVICE} (tcp/${FW_PORT}) only, outbound open..."
+fw_create_acl "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PROFILE_FAMILY}" \
+  || fail "unable to create firewall ACL '${INSTANCE_NAME}'. The instance exists without a firewall or public IP."
+mapfile -t FW_NIC_KEYS < <(fw_nic_keys "${INSTANCE_NAME}")
+
 DNS_FQDN="${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}"
 if [[ -n "${PUBLIC_IPV4}" ]]; then
   [[ -n "${INSTANCE_IPV4}" ]] || fail "unable to determine the IPv4 address of '${INSTANCE_NAME}' after waiting; no 1:1 NAT was created."
 
   echo "Mapping public ${PUBLIC_IPV4} 1:1 to ${INSTANCE_IPV4} on '${NETWORK_NAME}'..."
-  nat_attach "${INSTANCE_NAME}" "${PROJECT_NAME}" "${NETWORK_NAME}" "${PUBLIC_IPV4}" "${INSTANCE_IPV4}" \
+  nat_attach "${INSTANCE_NAME}" "${PROJECT_NAME}" "${NETWORK_NAME}" "${PUBLIC_IPV4}" "${INSTANCE_IPV4}" "${FW_NIC_KEYS[@]}" \
     || fail "unable to create the 1:1 NAT for '${INSTANCE_NAME}'. The instance exists without a public IP."
 
   dns_register_record "${DNS_FQDN}" "${PUBLIC_IPV4}" || true
 else
   # Internal OVN addresses aren't reachable from INFNET, so they get no record.
   [[ -n "${INSTANCE_IPV4}" ]] || INSTANCE_IPV4='unknown'
+  nat_set_nic "${INSTANCE_NAME}" "${PROJECT_NAME}" "${FW_NIC_KEYS[@]}" \
+    || fail "unable to attach firewall ACL '${INSTANCE_NAME}' to ${PUBLIC_IP_NIC}."
   echo "No public IP, so no DNS record is registered for '${DNS_FQDN}'."
 fi
 
@@ -486,6 +501,7 @@ echo "RAM         : ${RAM_GIB}GiB"
 echo "Boot disk   : ${DISK_GIB}GiB"
 echo "Instance IP : ${INSTANCE_IPV4}"
 echo "Public IP   : ${PUBLIC_IPV4:-none}${PUBLIC_IPV4:+ (1:1 NAT)}"
+echo "Firewall    : ACL '${INSTANCE_NAME}' - inbound ${FW_SERVICE} (tcp/${FW_PORT}) only"
 echo "Description : ${DESCRIPTION_TEXT}"
 if [[ -n "${PUBLIC_IPV4}" ]] && technitium_configured; then
   echo "DNS         : ${DNS_FQDN} -> ${PUBLIC_IPV4}"

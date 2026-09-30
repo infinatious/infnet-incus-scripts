@@ -112,7 +112,9 @@ nat_used_addresses "${UPLINK_NETWORK}" | grep -qxF "${ROUTER_IPV4}" \
 incus project show "${PROJECT_NAME}" >/dev/null 2>&1 && fail "project '${PROJECT_NAME}' already exists."
 
 echo "Creating project '${PROJECT_NAME}'..."
-run incus project create "${PROJECT_NAME}"
+# incus create/launch commands read YAML from stdin when it isn't a terminal,
+# so they get </dev/null to never block on (or swallow) a pipe or ssh channel.
+run incus project create "${PROJECT_NAME}" </dev/null
 
 PROJECT_SHOW_FILE="$(mktemp)"
 cleanup_project_metadata() {
@@ -157,7 +159,7 @@ run incus network create "${NETWORK_NAME}" \
   ipv4.address="${IPV4_ADDRESS}" \
   ipv4.nat=true \
   ipv6.address=none \
-  volatile.network.ipv4.address="${ROUTER_IPV4}"
+  volatile.network.ipv4.address="${ROUTER_IPV4}" </dev/null
 
 run incus project set "${PROJECT_NAME}" restricted.networks.access="${NETWORK_NAME}"
 run incus project set "${PROJECT_NAME}" restricted.devices.nic=managed
@@ -166,7 +168,7 @@ run incus project set "${PROJECT_NAME}" restricted.devices.disk=managed
 echo "Leaving the required default profile in place for project '${PROJECT_NAME}'..."
 
 echo "Creating Linux profile '${PROFILE_LINUX_NAME}' in project '${PROJECT_NAME}'..."
-run incus profile create "${PROFILE_LINUX_NAME}" --project "${PROJECT_NAME}"
+run incus profile create "${PROFILE_LINUX_NAME}" --project "${PROJECT_NAME}" </dev/null
 
 CLOUD_INIT_CONTENT="$(cat "${CLOUD_INIT_FILE}")"
 
@@ -194,7 +196,7 @@ name: ${PROFILE_LINUX_NAME}
 PROFILE
 
 echo "Creating Windows profile '${PROFILE_WIN_NAME}' in project '${PROJECT_NAME}'..."
-run incus profile create "${PROFILE_WIN_NAME}" --project "${PROJECT_NAME}"
+run incus profile create "${PROFILE_WIN_NAME}" --project "${PROJECT_NAME}" </dev/null
 
 CLOUDBASE_INIT_CONTENT="$(cat "${CLOUDBASE_INIT_FILE}")"
 
