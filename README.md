@@ -315,6 +315,21 @@ Replace the files in `branding/assets/` and re-run the script:
 
 To undo: `sudo rm /etc/apt/apt.conf.d/99-infnet-incus-ui-branding && sudo apt-get install --reinstall incus-ui-canonical`.
 
+### UEFI boot logo
+
+VMs show the Infinatious Cloud logo (`branding/assets/uefi-logo.bmp`, 576x192 24-bit BMP) while their firmware boots. The logo is compiled into the OVMF firmware, so `branding/uefi-logo.sh` rebuilds it:
+
+```bash
+./branding/uefi-logo.sh build         # ~5-10 min, in a throwaway container
+sudo ./branding/uefi-logo.sh apply    # installs it; VMs use it from their next boot
+./branding/uefi-logo.sh status
+sudo ./branding/uefi-logo.sh revert   # back to the stock firmware
+```
+
+`build` compiles OVMF exactly as Zabbly does for the incus package (same edk2 tag, patches and build flags, read from their `daily` build workflow), with only `MdeModulePkg/Logo/Logo.bmp` swapped. Only `/opt/incus/share/qemu/OVMF_CODE.4MB.fd` is replaced; each VM's variable store (Secure Boot keys, boot entries) is untouched. The build output (`branding/assets/uefi/`) isn't committed.
+
+`apply` saves the stock firmware under `/var/lib/infnet-uefi-logo/` and installs an APT hook (`/etc/apt/apt.conf.d/99-infnet-uefi-logo`). After an incus upgrade reinstalls the stock firmware, the hook puts the logo build back only if the package firmware is the same build that was branded; when incus ships **new** firmware it keeps it (stock logo) and warns to run `build` and `apply` again, so VMs never end up on older firmware.
+
 ---
 
 ## Scripts
