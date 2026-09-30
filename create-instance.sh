@@ -213,7 +213,7 @@ case "${PROFILE_TYPE}" in
     PROFILE_FAMILY='win'
     ;;
   docker|Docker|d)
-    PROFILE_NAME="${PROJECT_NAME}-docker"
+    PROFILE_NAME="${PROJECT_NAME}-linux-docker"
     PROFILE_FAMILY='linux'
     ;;
   *)

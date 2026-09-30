@@ -356,7 +356,7 @@ sudo ./branding/uefi-logo.sh revert   # back to the stock firmware
 ./deploy-project.sh --project-name demo --project-id 42
 ```
 
-Creates the project (description `Project ID: 42`, which the other scripts use to find it), an OVN network `demo` on `<IPV4_SUBNET_PREFIX>.42.1/24` behind `UPLINK_NETWORK`, and the profiles `demo-linux` (1 CPU, 2 GiB, 20 GiB, cloud-init from `cloud-init-user-data.yaml`) `demo-win` (2 CPU, 4 GiB, 64 GiB, cloudbase-init from `cloudbase-init-user-data.yaml`) and `demo-docker` (see [Docker profile](#docker-profile)). It warns if the uplink has no `ipv4.routes`, since instances in the project couldn't get public IPs.
+Creates the project (description `Project ID: 42`, which the other scripts use to find it), an OVN network `demo` on `<IPV4_SUBNET_PREFIX>.42.1/24` behind `UPLINK_NETWORK`, and the profiles `demo-linux` (1 CPU, 2 GiB, 20 GiB, cloud-init from `cloud-init-user-data.yaml`) `demo-win` (2 CPU, 4 GiB, 64 GiB, cloudbase-init from `cloudbase-init-user-data.yaml`) and `demo-linux-docker` (see [Docker profile](#docker-profile)). It warns if the uplink has no `ipv4.routes`, since instances in the project couldn't get public IPs.
 
 Projects created before a profile was added (e.g. the Docker one) get it with:
 
@@ -368,7 +368,7 @@ It creates whichever of the three standard profiles the project lacks and leaves
 
 ##### Docker profile
 
-`demo-docker` is for running Docker inside a system container rather than a full VM: 2 CPU, 4 GiB, 40 GiB, `security.nesting=true` (so dockerd can create its own namespaces, cgroups and overlay mounts while the container stays unprivileged), and the Linux cloud-init payload plus Docker Engine and the Compose plugin from Docker's own repos (`get.docker.com` on Debian/Ubuntu/Fedora, the RHEL repo on AlmaLinux/Rocky) with every user in the `docker` group. The payload is generated from `cloud-init-user-data.yaml` when the profile is created, so users and keys stay defined in one place; re-create the profile after editing that file. `create-instance.sh --profile-type docker` offers container images only and opens SSH like any Linux instance; published container ports still need an ingress rule on the instance's ACL (see [Firewall](#firewall)).
+`demo-linux-docker` is for running Docker inside a system container rather than a full VM: the same 1 CPU, 2 GiB, 20 GiB defaults as `demo-linux`, plus `security.nesting=true` (so dockerd can create its own namespaces, cgroups and overlay mounts while the container stays unprivileged), and the Linux cloud-init payload plus Docker Engine and the Compose plugin from Docker's own repos (`get.docker.com` on Debian/Ubuntu/Fedora, the RHEL repo on AlmaLinux/Rocky) with every user in the `docker` group. The payload is generated from `cloud-init-user-data.yaml` when the profile is created, so users and keys stay defined in one place; re-create the profile after editing that file. `create-instance.sh --profile-type docker` offers container images only and opens SSH like any Linux instance; published container ports still need an ingress rule on the instance's ACL (see [Firewall](#firewall)).
 
 #### `create-instance.sh`
 

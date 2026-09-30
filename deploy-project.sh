@@ -35,8 +35,8 @@ Usage: deploy-project.sh --project-name NAME --project-id ID
        deploy-project.sh --project-name NAME --add-missing-profiles
 
 Creates a project, its OVN network and three profiles: NAME-linux, NAME-win
-and NAME-docker (Linux with security.nesting on and Docker Engine plus the
-Compose plugin installed by cloud-init).
+and NAME-linux-docker (the Linux profile plus security.nesting and Docker
+Engine with the Compose plugin installed by cloud-init).
 
 Options:
   --project-name NAME     Project name to create.
@@ -144,14 +144,14 @@ create_standard_profiles() {
 
   # security.nesting lets dockerd create its own namespaces, cgroups and
   # overlay mounts inside the (still unprivileged) container.
-  name="${PROJECT_NAME}-docker"
+  name="${PROJECT_NAME}-linux-docker"
   if incus profile show "${name}" --project "${PROJECT_NAME}" >/dev/null 2>&1; then
     echo "Docker profile '${name}' already exists, leaving it."
   else
     echo "Creating Docker profile '${name}' in project '${PROJECT_NAME}'..."
     local user_data
     user_data="$(docker_user_data)" || fail "unable to build the Docker cloud-init payload."
-    write_profile "${name}" $'  limits.cpu: "2"\n  limits.memory: 4GiB\n  security.nesting: "true"' "${user_data}" 40GiB
+    write_profile "${name}" $'  limits.cpu: "1"\n  limits.memory: 2GiB\n  security.nesting: "true"' "${user_data}" 20GiB
   fi
 }
 
@@ -292,4 +292,4 @@ echo "Project : ${PROJECT_NAME}"
 echo "Network : ${NETWORK_NAME} (${IPV4_ADDRESS}, NAT ${ROUTER_IPV4})"
 echo "Uplink  : ${UPLINK_NETWORK}"
 echo "MTU     : ${OVN_MTU}"
-echo "Profiles: ${PROJECT_NAME}-linux, ${PROJECT_NAME}-win, ${PROJECT_NAME}-docker"
+echo "Profiles: ${PROJECT_NAME}-linux, ${PROJECT_NAME}-win, ${PROJECT_NAME}-linux-docker"
