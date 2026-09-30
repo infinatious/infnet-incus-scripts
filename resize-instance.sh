@@ -225,7 +225,9 @@ if [[ "${CURRENT_BOOT}" != "${NEW_BOOT}" && ${WAS_RUNNING} -eq 1 ]]; then
   read -r -p "Instance '${INSTANCE_NAME}' is running and must be stopped for boot disk changes. Stop it now? Type yes to stop, anything else to abort: " STOP_CONFIRM
   [[ "${STOP_CONFIRM}" == 'yes' ]] || fail 'resize cancelled because the instance must be powered off for boot disk changes.'
   echo "Stopping instance '${INSTANCE_NAME}' for root disk resize..."
-  run incus stop "${INSTANCE_NAME}" --project "${PROJECT_NAME}"
+  # Without a timeout this waits forever if the guest ignores the shutdown.
+  incus stop "${INSTANCE_NAME}" --timeout 120 --project "${PROJECT_NAME}" \
+    || fail "'${INSTANCE_NAME}' did not shut down within 2 minutes; shut it down from inside the guest (or run 'incus stop --force ${INSTANCE_NAME} --project ${PROJECT_NAME}') and re-run the resize."
   RESTART_NEEDED=1
 elif [[ "${CURRENT_BOOT}" != "${NEW_BOOT}" ]]; then
   echo "Instance '${INSTANCE_NAME}' is already stopped for boot disk resize."

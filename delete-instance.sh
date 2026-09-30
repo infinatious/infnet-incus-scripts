@@ -168,7 +168,11 @@ fi
 [[ "${CONFIRM}" == 'yes' ]] || fail 'deletion cancelled.'
 
 echo "Stopping instance '${INSTANCE_NAME}'..."
-incus stop "${INSTANCE_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
+# A plain stop waits forever for a guest that ignores the shutdown request
+# (e.g. a Windows VM still booting); it is being deleted, so force it after a
+# minute.
+incus stop "${INSTANCE_NAME}" --timeout 60 --project "${PROJECT_NAME}" >/dev/null 2>&1 \
+  || incus stop "${INSTANCE_NAME}" --force --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
 
 echo "Deleting instance '${INSTANCE_NAME}'..."
 run incus delete "${INSTANCE_NAME}" --project "${PROJECT_NAME}"

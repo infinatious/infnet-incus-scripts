@@ -117,6 +117,30 @@ print(random.SystemRandom().choice(free))
 ' "${routes}" "${gateway}"
 }
 
+# Prints the first free address in an OVN network's subnet, skipping the
+# gateway, current leases and addresses pinned on any instance's NIC. Used to
+# configure a new instance's NIC completely before its first start: changing
+# ipv4.address later re-plugs the NIC, which a booting VM can't take.
+nat_allocate_internal_address() {
+  local network="$1" project="$2" cidr
+  cidr="$(incus network get "${network}" ipv4.address --project "${project}" 2>/dev/null)"
+  [[ -n "${cidr}" ]] || { echo "Error: network '${network}' has no ipv4.address." >&2; return 1; }
+  {
+    incus network list-leases "${network}" --project "${project}" -f json 2>/dev/null | jq -r '.[].address'
+    incus list --project "${project}" -f json 2>/dev/null \
+      | jq -r --arg n "${network}" '.[].expanded_devices[] | select(.type == "nic" and .network == $n) | .["ipv4.address"] // empty'
+  } | python3 -c '
+import ipaddress, sys
+iface = ipaddress.IPv4Interface(sys.argv[1])
+used = {l.strip() for l in sys.stdin if l.strip()} | {str(iface.ip)}
+for ip in iface.network.hosts():
+    if str(ip) not in used:
+        print(ip)
+        sys.exit(0)
+sys.exit(f"Error: no free address left in {iface.network}.")
+' "${cidr}"
+}
+
 # Prints the instance currently using a public IP as its external address,
 # or nothing if no instance in the project claims it.
 nat_find_owner() {

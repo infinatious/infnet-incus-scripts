@@ -119,7 +119,9 @@ if [[ -n "${INSTANCE_LIST}" ]]; then
       [[ -n "${INSTANCE_NAME}" ]] || continue
       PUBLIC_IP="$(nat_instance_address "${INSTANCE_NAME}" "${PROJECT_NAME}")"
       echo "Stopping instance '${INSTANCE_NAME}'..."
-      incus stop "${INSTANCE_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
+      # Force after a minute: a guest can ignore the shutdown request forever.
+      incus stop "${INSTANCE_NAME}" --timeout 60 --project "${PROJECT_NAME}" >/dev/null 2>&1 \
+        || incus stop "${INSTANCE_NAME}" --force --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
       echo "Deleting instance '${INSTANCE_NAME}'..."
       run incus delete "${INSTANCE_NAME}" --project "${PROJECT_NAME}"
       if [[ -n "${PUBLIC_IP}" ]]; then

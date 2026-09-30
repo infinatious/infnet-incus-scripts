@@ -411,24 +411,75 @@ fi
 (( NEXT_SEQ <= 99 )) || fail 'next sequence would exceed 99.'
 INSTANCE_NAME="$(printf '%s%02d' "${NAME_PREFIX}" "${NEXT_SEQ}")"
 
-LAUNCH_ARGS=(launch --project "${PROJECT_NAME}" --profile "${PROFILE_NAME}" "${SELECTED_FP_FULL}" "${INSTANCE_NAME}" -c limits.cpu="${CPU_CORES}" -c limits.memory="${RAM_GIB}GiB")
+INIT_ARGS=(init --project "${PROJECT_NAME}" --profile "${PROFILE_NAME}" "${SELECTED_FP_FULL}" "${INSTANCE_NAME}" -c limits.cpu="${CPU_CORES}" -c limits.memory="${RAM_GIB}GiB")
 if [[ "${SELECTED_TYPE}" == 'virtual-machine' ]]; then
-  LAUNCH_ARGS+=(--vm)
+  INIT_ARGS+=(--vm)
 fi
-LAUNCH_ARGS+=(-d root,size="${DISK_GIB}GiB")
+INIT_ARGS+=(-d root,size="${DISK_GIB}GiB")
 
 echo "Creating instance '${INSTANCE_NAME}' from image ${SELECTED_ALIAS} (${SELECTED_FP12})..."
 # incus create/launch commands read YAML from stdin when it isn't a terminal,
 # so they get </dev/null to never block on (or swallow) a pipe or ssh channel.
-run incus "${LAUNCH_ARGS[@]}" </dev/null
+run incus "${INIT_ARGS[@]}" </dev/null
 
-echo 'Waiting for IPv4 address...'
-# The guest-reported address needs the incus-agent; VMs without it (e.g. a
-# fresh Windows install) never report one, so fall back to the address OVN
-# assigned to the NIC's port, matched by MAC.
-INSTANCE_HWADDR="$(incus config get "${INSTANCE_NAME}" "volatile.${PUBLIC_IP_NIC}.hwaddr" --project "${PROJECT_NAME}" 2>/dev/null || true)"
+# Images that can't load the incus-agent over virtiofs/9p (e.g. Windows) are
+# marked requirements.cdrom_agent and won't start without the agent drive.
+NEEDS_AGENT_DRIVE="$(incus image show "${SELECTED_FP_FULL}" --project default 2>/dev/null \
+  | python3 -c 'import sys, yaml; print((yaml.safe_load(sys.stdin) or {}).get("properties", {}).get("requirements.cdrom_agent", ""))')"
+if [[ "${SELECTED_TYPE}" == 'virtual-machine' && "${NEEDS_AGENT_DRIVE}" == 'true' ]]; then
+  echo 'Image requires the incus-agent drive; adding it...'
+  run incus config device add "${INSTANCE_NAME}" agent disk source=agent:config --project "${PROJECT_NAME}" </dev/null
+fi
+
+# Configure the NIC completely (firewall, pinned address, 1:1 NAT) before the
+# first start: changing it on a running VM re-plugs the NIC, which a booting
+# guest (e.g. Windows) doesn't release in time ("Duplicate device ID").
+remove_new_instance() {
+  incus delete -f "${INSTANCE_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
+  [[ -z "${PUBLIC_IPV4}" ]] || incus network forward delete "${NETWORK_NAME}" "${PUBLIC_IPV4}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
+  fw_delete_acl "${INSTANCE_NAME}" "${PROJECT_NAME}" >/dev/null 2>&1 || true
+}
+
+read -r FW_PORT FW_SERVICE <<< "$(fw_default_rule "${PROFILE_FAMILY}")"
+echo "Creating firewall ACL '${INSTANCE_NAME}': inbound ICMP and ${FW_SERVICE} (tcp/${FW_PORT}) only, outbound open..."
+fw_create_acl "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PROFILE_FAMILY}" \
+  || { remove_new_instance; fail "unable to create firewall ACL '${INSTANCE_NAME}'; the instance was removed."; }
+mapfile -t FW_NIC_KEYS < <(fw_nic_keys "${INSTANCE_NAME}")
+
+DNS_FQDN="${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}"
 INSTANCE_IPV4=''
+if [[ -n "${PUBLIC_IPV4}" ]]; then
+  INSTANCE_IPV4="$(nat_allocate_internal_address "${NETWORK_NAME}" "${PROJECT_NAME}")" \
+    || { remove_new_instance; fail "no internal address available on '${NETWORK_NAME}'; the instance was removed."; }
+  echo "Mapping public ${PUBLIC_IPV4} 1:1 to ${INSTANCE_IPV4} on '${NETWORK_NAME}'..."
+  nat_attach "${INSTANCE_NAME}" "${PROJECT_NAME}" "${NETWORK_NAME}" "${PUBLIC_IPV4}" "${INSTANCE_IPV4}" "${FW_NIC_KEYS[@]}" \
+    || { remove_new_instance; fail "unable to create the 1:1 NAT for '${INSTANCE_NAME}'; the instance was removed."; }
+else
+  nat_set_nic "${INSTANCE_NAME}" "${PROJECT_NAME}" "${FW_NIC_KEYS[@]}" \
+    || { remove_new_instance; fail "unable to attach firewall ACL '${INSTANCE_NAME}' to ${PUBLIC_IP_NIC}; the instance was removed."; }
+fi
+
+if ! incus start "${INSTANCE_NAME}" --project "${PROJECT_NAME}"; then
+  # It never ran, so remove it (with its forward and ACL) rather than leave an
+  # orphan that also bumps the next instance's sequence number.
+  remove_new_instance
+  fail "instance '${INSTANCE_NAME}' failed to start and was removed."
+fi
+
+if [[ -n "${PUBLIC_IPV4}" ]]; then
+  dns_register_record "${DNS_FQDN}" "${PUBLIC_IPV4}" || true
+else
+  echo "No public IP, so no DNS record is registered for '${DNS_FQDN}'."
+fi
+
+# With a public IP the address was pinned above; otherwise find the one OVN
+# handed out. The guest-reported address needs the incus-agent; VMs without
+# it (e.g. a fresh Windows install) never report one, so fall back to the
+# address OVN assigned to the NIC's port, matched by MAC.
+[[ -n "${INSTANCE_IPV4}" ]] || echo 'Waiting for IPv4 address...'
+INSTANCE_HWADDR="$(incus config get "${INSTANCE_NAME}" "volatile.${PUBLIC_IP_NIC}.hwaddr" --project "${PROJECT_NAME}" 2>/dev/null || true)"
 for _ in $(seq 1 60); do
+  [[ -n "${INSTANCE_IPV4}" ]] && break
   INSTANCE_IPV4="$(incus query "/1.0/instances/${INSTANCE_NAME}/state?project=${PROJECT_NAME}" 2>/dev/null \
     | jq -r --arg nic "${PUBLIC_IP_NIC}" '.network[$nic].addresses[]? | select(.family=="inet" and .scope=="global") | .address' | head -n1)"
   if [[ -z "${INSTANCE_IPV4}" && -n "${INSTANCE_HWADDR}" ]]; then
@@ -438,28 +489,9 @@ for _ in $(seq 1 60); do
   [[ -n "${INSTANCE_IPV4}" ]] && break
   sleep 2
 done
-read -r FW_PORT FW_SERVICE <<< "$(fw_default_rule "${PROFILE_FAMILY}")"
-echo "Creating firewall ACL '${INSTANCE_NAME}': inbound ICMP and ${FW_SERVICE} (tcp/${FW_PORT}) only, outbound open..."
-fw_create_acl "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PROFILE_FAMILY}" \
-  || fail "unable to create firewall ACL '${INSTANCE_NAME}'. The instance exists without a firewall or public IP."
-mapfile -t FW_NIC_KEYS < <(fw_nic_keys "${INSTANCE_NAME}")
-
-DNS_FQDN="${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}"
-if [[ -n "${PUBLIC_IPV4}" ]]; then
-  [[ -n "${INSTANCE_IPV4}" ]] || fail "unable to determine the IPv4 address of '${INSTANCE_NAME}' after waiting; no 1:1 NAT was created."
-
-  echo "Mapping public ${PUBLIC_IPV4} 1:1 to ${INSTANCE_IPV4} on '${NETWORK_NAME}'..."
-  nat_attach "${INSTANCE_NAME}" "${PROJECT_NAME}" "${NETWORK_NAME}" "${PUBLIC_IPV4}" "${INSTANCE_IPV4}" "${FW_NIC_KEYS[@]}" \
-    || fail "unable to create the 1:1 NAT for '${INSTANCE_NAME}'. The instance exists without a public IP."
-
-  dns_register_record "${DNS_FQDN}" "${PUBLIC_IPV4}" || true
-else
-  # Internal OVN addresses aren't reachable from INFNET, so they get no record.
-  [[ -n "${INSTANCE_IPV4}" ]] || INSTANCE_IPV4='unknown'
-  nat_set_nic "${INSTANCE_NAME}" "${PROJECT_NAME}" "${FW_NIC_KEYS[@]}" \
-    || fail "unable to attach firewall ACL '${INSTANCE_NAME}' to ${PUBLIC_IP_NIC}."
-  echo "No public IP, so no DNS record is registered for '${DNS_FQDN}'."
-fi
+# Internal OVN addresses aren't reachable from INFNET, so a VM without a
+# public IP that never reports one is fine.
+[[ -n "${INSTANCE_IPV4}" ]] || INSTANCE_IPV4='unknown'
 
 if [[ -n "${DESCRIPTION_SUFFIX_ARG}" ]]; then
   DESCRIPTION_SUFFIX="${DESCRIPTION_SUFFIX_ARG}"

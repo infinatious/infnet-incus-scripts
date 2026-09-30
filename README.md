@@ -374,7 +374,7 @@ Creates the project (description `Project ID: 42`, which the other scripts use t
 - `--public-ip IP` gives the instance that 1:1 NAT address, `--public-ip random` a random free one from the uplink's `ipv4.routes`, and `--no-public-ip` none at all (it then only reaches out through its project's shared NAT address, and gets no DNS record). With none of these the script asks whether to assign a public IP and which one (blank = random); when it isn't run from a terminal it picks a random one. The address is checked before the instance is created.
 - `--description-suffix` appends text to the instance description. It is only prompted for when the script is run with no arguments at all.
 
-The instance is named `<env prefix><project id>-<service code>-<ct|vs><nn>` (e.g. `pd20-dnsag-ct01`). Once it has an address the script creates the instance's [firewall ACL](#firewall) (ICMP plus SSH or RDP inbound only), creates the [1:1 NAT](#11-nat) and registers `<instance-name>.<zone>` in Technitium (if configured) - both only when it has a public IP - and sets the description to the public IP (empty if it has none), plus the optional suffix.
+The instance is named `<env prefix><project id>-<service code>-<ct|vs><nn>` (e.g. `pd20-dnsag-ct01`). Before the instance first starts, the script creates its [firewall ACL](#firewall) (ICMP plus SSH or RDP inbound only) and, with a public IP, pins the NIC to a free internal address and creates the [1:1 NAT](#11-nat) - all while it is stopped, because changing the NIC of a running VM re-plugs it and a booting guest (Windows especially) fails with `Duplicate device ID`. VM images marked `requirements.cdrom_agent` also get the `agent:config` disk they need. If the first start fails, the instance, forward and ACL are removed again. It then registers `<instance-name>.<zone>` in Technitium (if configured and it has a public IP) and sets the description to the public IP (empty if it has none), plus the optional suffix.
 
 The internal address is read from the guest (needs the `incus-agent` in VMs) or, failing that, from the address OVN assigned to the NIC - so VMs without the agent, such as a fresh Windows install, still work.
 
@@ -392,7 +392,7 @@ Growing the root disk of a running instance stops and restarts it (after confirm
 ./delete-instance.sh --project-id 42 --instance-name p42-tstng-ct01 --yes
 ```
 
-`--instance-index` selects from the numbered list instead of `--instance-name`. After the instance is deleted, its network forward (the inbound half of the NAT), its firewall ACL and its DNS record are removed.
+`--instance-index` selects from the numbered list instead of `--instance-name`. The instance gets a minute to shut down cleanly before it is force-stopped (a Windows VM that is still booting ignores the shutdown request). After the instance is deleted, its network forward (the inbound half of the NAT), its firewall ACL and its DNS record are removed.
 
 #### `delete-project.sh`
 
@@ -574,4 +574,5 @@ The [MicroCloud Vault](https://github.com/infinatious/microcloud-backup-manager)
 ## Notes
 
 - Images and aliases: `./manage-images.sh` (or `incus image alias create NAME FINGERPRINT --project default`).
+- The Windows Server 2025 image (`win2025`) was built with [antifob/incus-windows](https://github.com/antifob/incus-windows). Like other images that can't load the incus-agent over a shared filesystem, it's marked `requirements.cdrom_agent`, so `create-instance.sh` adds the `agent:config` disk device those VMs need before starting them.
 - The image picker filters by profile family: Linux lists images whose aliases don't contain `win`, Windows lists only those that do.
