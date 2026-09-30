@@ -37,7 +37,7 @@ Edit the **Host bootstrap** and **Authentik OIDC** sections of `.env`:
 | `INCUS_ADMIN_USER` | User added to `incus-admin` so it can run `incus` without sudo |
 | `STORAGE_DEVICE` | Whole disk for the `zpool` ZFS pool, as a `/dev/disk/by-id/` path |
 | `OVN_ENCAP_IP` | This host's management IP: OVN Geneve tunnel endpoint and, once clustered, its cluster address |
-| `OVN_CENTRAL_ADDRESS` | Joining hosts only: the host running the OVN databases (see [Clustering](#clustering)) |
+| `OVN_CENTRAL_ADDRESSES` | Clusters only: comma-separated `OVN_ENCAP_IP`s of the hosts that run the OVN databases (normally three), identical on every member (see [Clustering](#clustering)) |
 | `UPLINK_PARENT` | NIC wired to the public network (no IP configured on it) |
 | `UPLINK_IPV4_GATEWAY` | Upstream gateway with prefix, e.g. `172.31.232.1/21` |
 | `UPLINK_IPV4_OVN_RANGES` | Addresses the OVN routers take for their own uplink ports (one per project network, used for shared outbound NAT) |
@@ -147,35 +147,64 @@ Windows images: `distrobuilder repack-windows` (from `incus-extra`) injects the 
 
 A standalone host built by `setup-incus-host.sh` can grow into a cluster without touching its instances.
 
+Two databases have to survive a host failure, and with three members both do:
+
+- **Incus** (dqlite) is replicated to up to three members automatically and needs a majority, 2 of 3, to keep the API working.
+- **OVN** (northbound and southbound) runs as an OVN RAFT cluster on the hosts in `OVN_CENTRAL_ADDRESSES`, also needing 2 of 3. Every client (each host's `ovn-controller` and `ovn-northd`, and Incus) is given all members' addresses and fails over by itself. `ovn-northd` runs on every member and holds a lock, so one is active at a time.
+
+Plan the three OVN members before starting and put the same `OVN_CENTRAL_ADDRESSES` in every host's `.env`, including the first host. Further hosts can join as chassis-only members (leave them out of the list). A two-member cluster has no failure tolerance at all, for either database.
+
 ### 1. Convert the existing host (once)
 
 ```bash
 sudo host/cluster-enable.sh --add-member <new-host-short-name>
 ```
 
-- Makes the OVN databases on this host listen on `OVN_ENCAP_IP` (northbound tcp/6641, southbound tcp/6642) and points this host's OVN chassis and Incus (`network.ovn.northbound_connection`) at that address instead of the local sockets.
+- Converts this host's standalone OVN databases into a one-member OVN RAFT cluster (contents kept; the standalone files are copied to `/var/lib/ovn/standalone-backup`), serving clients on `OVN_ENCAP_IP` (northbound tcp/6641, southbound tcp/6642, RAFT tcp/6643-6644). It's done by `ovn-ctl` from the cluster options the script writes to `/etc/default/ovn-central`.
+- Points this host's OVN chassis, `ovn-northd` and Incus (`network.ovn.northbound_connection`) at every address in `OVN_CENTRAL_ADDRESSES`. Members that don't exist yet are skipped until they come up.
 - Sets `cluster.https_address=<OVN_ENCAP_IP>:8443` (clustering can't use the `[::]` wildcard) and runs `incus cluster enable`.
 - Prints a single-use join token per `--add-member`. Later tokens: `incus cluster add <name>` on any member.
 
 ### 2. Join each new host
 
-On the new host: clone the repository to `/opt/infnet-incus-scripts`, create its `.env` (its own `STORAGE_DEVICE`, `UPLINK_PARENT`, `OVN_ENCAP_IP`, plus `OVN_CENTRAL_ADDRESS` = the first host's `OVN_ENCAP_IP`), then:
+On the new host: clone the repository to `/opt/infnet-incus-scripts`, create its `.env` (its own `STORAGE_DEVICE`, `UPLINK_PARENT`, `OVN_ENCAP_IP`, plus the shared `OVN_CENTRAL_ADDRESSES`), then:
 
 ```bash
 sudo host/cluster-join.sh --token <token> [--wipe-storage-device]
 ```
 
-It installs the same packages as `setup-incus-host.sh` (without the OVN databases), checks it can reach the cluster and OVN, points its OVN chassis at the cluster's databases, and joins with its own `zpool` disk and uplink NIC (`member_config`). Networks, projects, profiles and OIDC come from the cluster. It also sets up the NFS mount, backup timer and UI branding. The host must be clean: it refuses to join if Incus is already initialized there.
+It installs the same packages as `setup-incus-host.sh`, checks it can reach the cluster and an existing OVN database member, joins the OVN RAFT cluster through that member if its own `OVN_ENCAP_IP` is in `OVN_CENTRAL_ADDRESSES` (otherwise it doesn't run the OVN databases at all), points its OVN chassis at every OVN member, and joins with its own `zpool` disk and uplink NIC (`member_config`). Networks, projects, profiles and OIDC come from the cluster. It also sets up the NFS mount, backup timer and UI branding. The host must be clean: it refuses to join if Incus is already initialized there.
+
+Join the remaining OVN members promptly: while only two of three have joined, OVN needs both of them up.
+
+### Changing the OVN members later
+
+Edit `OVN_CENTRAL_ADDRESSES` in every member's `.env`, then re-run `cluster-enable.sh` on the first host and `cluster-join.sh` (no token) on the others; on an existing member it skips the join. That re-points every client. Removing a database member from the RAFT cluster itself is a manual `ovn-appctl -t /var/run/ovn/ovn{nb,sb}_db.ctl cluster/kick` on a remaining member.
+
+### Checking OVN health
+
+```bash
+sudo ovn-appctl -t /var/run/ovn/ovnnb_db.ctl cluster/status OVN_Northbound   # Role, Leader, Servers
+sudo ovn-appctl -t /var/run/ovn/ovnsb_db.ctl cluster/status OVN_Southbound
+```
 
 ### Requirements and caveats
 
-- **Network:** members reach the OVN host on tcp/6641-6642 and each other on tcp/8443 and udp/6081 (Geneve). Each member's `UPLINK_PARENT` must be on the same public L2 network. On VLAN 29, new hosts also need the same UniFi rules as the first (NFS, Authentik).
-- **OVN is a single point of failure:** only the first host runs the OVN databases. With three or more members, grow them into an OVN RAFT cluster.
+- **Network:** members reach each other on tcp/8443 (Incus), tcp/6641-6644 (OVN clients and RAFT) and udp/6081 (Geneve). Each member's `UPLINK_PARENT` must be on the same public L2 network. On VLAN 29, new hosts also need the same UniFi rules as the first (NFS, Authentik).
+- **What a host failure takes down:** with three members, only the instances on the failed host. The other members' instances, networking (including gateways, which OVN moves to a surviving host), 1:1 NAT and the API keep working.
+- **No new public IPs while a member is down:** Incus refuses to create or delete network forwards unless every member is online (`peer node ... is down`), so `create-instance.sh --public-ip` fails cleanly (it removes the half-made instance) until the host is back. Instances without a public IP can still be created. If a host is gone for good, `incus cluster remove --force <member>` lifts this.
 - **Storage stays per-host ZFS:** each instance lives on one member; `incus move <instance> --target <member>` copies it (no live migration), and an instance goes down with its host. Shared storage (Ceph) is what buys failover.
 - **Placement:** `create-instance.sh` lets Incus pick the member (the least loaded).
 - **Backups:** on a cluster, `backup-instances.sh` only backs up the instances on the member it runs on, so the timer installed on every member covers them all (or run one `--all-members` job instead).
 
-Tested end to end on two lab VMs: an existing instance and its 1:1 NAT kept working through `cluster-enable.sh`; after `cluster-join.sh`, a new instance landed on the new member with working 1:1 NAT (inbound, and outbound TCP from its public IP) and cross-member instance traffic.
+Tested end to end on three lab VMs:
+- An existing instance and its 1:1 NAT kept working through `cluster-enable.sh`, and the OVN contents carried over into the new RAFT cluster.
+- After both `cluster-join.sh` runs, instances on each member had working 1:1 NAT (inbound, and outbound from their own public IP), and traffic between members worked.
+- The first host was then force-stopped while it was the leader of the Incus database and both OVN databases, and hosted the active gateway of every network. Within 20 seconds:
+  - both of the others had elected new leaders and moved the gateways;
+  - instances on the surviving hosts kept inbound, 1:1 NAT outbound and shared-router NAT outbound;
+  - the API answered, and instances without a public IP could still be created.
+- When restarted, the host rejoined everything by itself and its instance came back working.
 
 ---
 

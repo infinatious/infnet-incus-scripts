@@ -17,17 +17,25 @@ Usage: cluster-enable.sh [--member-name NAME] [--add-member NAME]...
 Converts this standalone Incus server (built by setup-incus-host.sh) into the
 first member of a cluster, without touching its instances:
 
-  1. The OVN databases on this host start listening on OVN_ENCAP_IP
-     (northbound tcp/6641, southbound tcp/6642) so other members' chassis can
-     reach them, and this host's chassis and Incus are pointed at that
-     address instead of the local sockets.
-  2. cluster.https_address is set to OVN_ENCAP_IP:8443 (clustering can't use
+  1. The OVN databases on this host become a one-member OVN RAFT cluster
+     (contents kept, standalone copies saved under
+     /var/lib/ovn/standalone-backup) serving clients on OVN_ENCAP_IP
+     (northbound tcp/6641, southbound tcp/6642). The other hosts listed in
+     OVN_CENTRAL_ADDRESSES grow it to full size as they join with
+     cluster-join.sh.
+  2. This host's OVN chassis, its ovn-northd and Incus
+     (network.ovn.northbound_connection) are pointed at every address in
+     OVN_CENTRAL_ADDRESSES, so they fail over to whichever members are up.
+  3. cluster.https_address is set to OVN_ENCAP_IP:8443 (clustering can't use
      the wildcard address) and `incus cluster enable` is run.
-  3. For each --add-member, a join token is printed for cluster-join.sh.
+  4. For each --add-member, a join token is printed for cluster-join.sh.
 
-This host keeps running the only copy of the OVN databases, so it is a
-single point of failure for OVN networking. Members must reach it on
-tcp/6641-6642, and each other on tcp/8443 and udp/6081 (Geneve).
+OVN_CENTRAL_ADDRESSES must list this host's OVN_ENCAP_IP and be identical in
+every member's .env. With three members the OVN databases and the Incus
+database each keep working when any one host is down.
+
+Safe to re-run, e.g. after changing OVN_CENTRAL_ADDRESSES: it only rewrites
+the OVN settings and skips the steps already done.
 
 Options:
   --member-name NAME  Cluster name for this host (default: short hostname).
@@ -65,6 +73,9 @@ source "${SCRIPT_DIR}/common.sh"
 
 : "${OVN_ENCAP_IP:?OVN_ENCAP_IP not set in ${ENV_FILE}}"
 host_require_root_and_os
+host_load_ovn_central_addresses
+host_is_ovn_central_member \
+  || fail "OVN_CENTRAL_ADDRESSES (${OVN_CENTRAL_ADDRESSES}) must include this host's OVN_ENCAP_IP ${OVN_ENCAP_IP}."
 
 SERVER_INFO="$(incus query /1.0)" || fail 'unable to reach the local Incus server.'
 CLUSTERED="$(jq -r '.environment.server_clustered // false' <<< "${SERVER_INFO}")"
@@ -72,24 +83,20 @@ CLUSTERED="$(jq -r '.environment.server_clustered // false' <<< "${SERVER_INFO}"
 [[ -S /run/ovn/ovnnb_db.sock ]] || fail 'the OVN databases (ovn-central) do not run on this host; run this on the host setup-incus-host.sh built.'
 ip -4 -o addr show | grep -qw "inet ${OVN_ENCAP_IP}" || fail "OVN_ENCAP_IP ${OVN_ENCAP_IP} is not an address of this host."
 
-NORTHBOUND="tcp:${OVN_ENCAP_IP}:6641"
-SOUTHBOUND="tcp:${OVN_ENCAP_IP}:6642"
+# Client listeners now come from ovn-ctl (per host, on its own address). A
+# listener stored in the database would be replicated to every member, where
+# its address doesn't exist, so drop any left from older versions of this
+# script while the database is still standalone.
+if ovsdb-tool db-is-standalone /var/lib/ovn/ovnnb_db.db 2>/dev/null; then
+  ovn-nbctl del-connection
+  ovn-sbctl del-connection
+fi
 
-step "OVN databases on ${OVN_ENCAP_IP} (northbound 6641, southbound 6642)"
-# Listening addresses are ptcp:PORT:IP (port first), unlike the tcp:IP:PORT
-# form clients use to connect.
-ovn-nbctl set-connection "ptcp:6641:${OVN_ENCAP_IP}"
-ovn-sbctl set-connection "ptcp:6642:${OVN_ENCAP_IP}"
-for _ in $(seq 1 20); do
-  ss -ltn | grep -q "${OVN_ENCAP_IP}:6641 " && ss -ltn | grep -q "${OVN_ENCAP_IP}:6642 " && break
-  sleep 1
-done
-ss -ltn | grep -q "${OVN_ENCAP_IP}:6642 " || fail "OVN southbound is not listening on ${OVN_ENCAP_IP}:6642."
+host_configure_ovn_central "${OVN_ENCAP_IP}"
+host_configure_ovn_chassis "${OVN_SB_REMOTES}" "${OVN_ENCAP_IP}"
 
-host_configure_ovn_chassis "${SOUTHBOUND}" "${OVN_ENCAP_IP}"
-
-step "Incus OVN connection -> ${NORTHBOUND}"
-incus config set network.ovn.northbound_connection="${NORTHBOUND}"
+step "Incus OVN connection -> ${OVN_NB_REMOTES}"
+incus config set network.ovn.northbound_connection="${OVN_NB_REMOTES}"
 
 if [[ "${CLUSTERED}" == 'true' ]]; then
   step 'Already clustered, skipping cluster enable'
@@ -107,5 +114,6 @@ done
 step 'Done'
 incus cluster list
 echo
-echo "OVN_CENTRAL_ADDRESS for joining hosts' .env: ${OVN_ENCAP_IP}"
+echo "Every member's .env needs OVN_CENTRAL_ADDRESSES='${OVN_CENTRAL_ADDRESSES}'."
 echo "Join a host: on it, run: sudo host/cluster-join.sh --token <token from 'incus cluster add <name>'>"
+echo "Join the other OVN members promptly: with two of three joined, OVN needs both up."

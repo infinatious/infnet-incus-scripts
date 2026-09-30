@@ -45,8 +45,8 @@ Signed-By: ${key_file}
 EOF
 }
 
-# Installs Incus and its dependencies; pass --with-ovn-central on the host
-# that runs the OVN databases.
+# Installs Incus and its dependencies; pass --with-ovn-central on hosts that
+# run the OVN databases.
 host_install_packages() {
   local packages=(incus incus-ui-canonical incus-extra zfsutils-linux ovn-host nfs-common jq curl python3 python3-yaml)
   [[ "${1:-}" == '--with-ovn-central' ]] && packages+=(ovn-central)
@@ -66,6 +66,87 @@ host_configure_ovn_chassis() {
     external_ids:ovn-remote="${southbound}" \
     external_ids:ovn-encap-type=geneve \
     external_ids:ovn-encap-ip="${encap_ip}"
+}
+
+# Reads OVN_CENTRAL_ADDRESSES (comma-separated management IPs of the hosts that
+# run the OVN databases) into OVN_CENTRAL_IPS and sets OVN_NB_REMOTES /
+# OVN_SB_REMOTES, the connection lists every client uses so it can fail over
+# to any member.
+host_load_ovn_central_addresses() {
+  local address
+  : "${OVN_CENTRAL_ADDRESSES:?OVN_CENTRAL_ADDRESSES not set in ${ENV_FILE}}"
+  IFS=', ' read -r -a OVN_CENTRAL_IPS <<< "${OVN_CENTRAL_ADDRESSES}"
+  (( ${#OVN_CENTRAL_IPS[@]} > 0 )) || fail 'OVN_CENTRAL_ADDRESSES is empty.'
+  OVN_NB_REMOTES=''
+  OVN_SB_REMOTES=''
+  for address in "${OVN_CENTRAL_IPS[@]}"; do
+    [[ "${address}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "OVN_CENTRAL_ADDRESSES entry '${address}' is not an IPv4 address."
+    OVN_NB_REMOTES+="${OVN_NB_REMOTES:+,}tcp:${address}:6641"
+    OVN_SB_REMOTES+="${OVN_SB_REMOTES:+,}tcp:${address}:6642"
+  done
+  (( ${#OVN_CENTRAL_IPS[@]} % 2 == 1 )) \
+    || echo "Warning: ${#OVN_CENTRAL_IPS[@]} OVN database members; an even count tolerates no more failures than one fewer." >&2
+}
+
+# True if this host (OVN_ENCAP_IP) is one of the OVN database members.
+host_is_ovn_central_member() {
+  local address
+  for address in "${OVN_CENTRAL_IPS[@]}"; do
+    [[ "${address}" == "${OVN_ENCAP_IP}" ]] && return 0
+  done
+  return 1
+}
+
+# Runs this host's OVN databases as a member of the RAFT cluster (NB raft
+# tcp/6643, SB raft tcp/6644), serving clients on its own address tcp/6641-6642.
+# ovn-ctl does the conversion itself: with no remote it turns an existing
+# standalone database into a new one-member cluster, keeping its contents;
+# with a remote it discards the local standalone database and joins that
+# member's cluster. Later starts reuse the clustered files. ovn-northd runs on
+# every member but holds a lock, so only one is active at a time.
+host_configure_ovn_central() {
+  local local_ip="$1" remote_ip="${2:-}" opts db schema
+  opts="--db-nb-cluster-local-addr=${local_ip} --db-sb-cluster-local-addr=${local_ip}"
+  [[ -n "${remote_ip}" ]] && opts+=" --db-nb-cluster-remote-addr=${remote_ip} --db-sb-cluster-remote-addr=${remote_ip}"
+  opts+=" --db-nb-create-insecure-remote=yes --db-nb-addr=${local_ip}"
+  opts+=" --db-sb-create-insecure-remote=yes --db-sb-addr=${local_ip}"
+  opts+=" --ovn-northd-nb-db=${OVN_NB_REMOTES} --ovn-northd-sb-db=${OVN_SB_REMOTES}"
+
+  step "OVN database cluster member on ${local_ip}${remote_ip:+ (joining via ${remote_ip})}"
+  for db in ovnnb_db ovnsb_db; do
+    if [[ -f "/var/lib/ovn/${db}.db" ]] && ovsdb-tool db-is-standalone "/var/lib/ovn/${db}.db"; then
+      mkdir -p /var/lib/ovn/standalone-backup
+      cp -a "/var/lib/ovn/${db}.db" "/var/lib/ovn/standalone-backup/${db}.db.$(date +%Y%m%d%H%M%S)"
+    fi
+  done
+  printf '%s\n' \
+    '# Managed by infnet-incus-scripts (host/common.sh): this host is an OVN RAFT' \
+    "# cluster member. Members: ${OVN_CENTRAL_ADDRESSES}" \
+    "OVN_CTL_OPTS=\"${opts}\"" > /etc/default/ovn-central.new
+  if ! cmp -s /etc/default/ovn-central.new /etc/default/ovn-central \
+    || ovsdb-tool db-is-standalone /var/lib/ovn/ovnnb_db.db 2>/dev/null \
+    || ovsdb-tool db-is-standalone /var/lib/ovn/ovnsb_db.db 2>/dev/null; then
+    mv /etc/default/ovn-central.new /etc/default/ovn-central
+    systemctl enable ovn-central >/dev/null 2>&1
+    systemctl restart ovn-central
+  else
+    rm -f /etc/default/ovn-central.new
+    systemctl enable --now ovn-central >/dev/null 2>&1
+  fi
+
+  for db in nb sb; do
+    schema='OVN_Northbound'
+    [[ "${db}" == 'sb' ]] && schema='OVN_Southbound'
+    for _ in $(seq 1 60); do
+      ovn-appctl -t "/var/run/ovn/ovn${db}_db.ctl" cluster/status "${schema}" 2>/dev/null \
+        | grep -q '^Status: cluster member' && break
+      sleep 2
+    done
+    ovn-appctl -t "/var/run/ovn/ovn${db}_db.ctl" cluster/status "${schema}" 2>/dev/null \
+      | grep -q '^Status: cluster member' \
+      || fail "the ${schema} database did not become a cluster member (see /var/log/ovn/ovsdb-server-${db}.log)."
+  done
+  ovn-appctl -t /var/run/ovn/ovnnb_db.ctl cluster/status OVN_Northbound | grep -E '^(Role|Servers):|^    ' | sed 's/^/  /'
 }
 
 host_add_admin_user() {
