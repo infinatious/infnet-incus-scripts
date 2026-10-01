@@ -40,6 +40,8 @@ MENU=(
   'Sync DNS records (dry run)'              'dns/sync-dns-records.sh --dry-run'
   'Re-apply web UI branding (sudo)'         'sudo branding/apply-ui-branding.sh'
   'Re-run host setup (sudo, no disk wipe)'  'sudo host/setup-incus-host.sh'
+  'Check for Incus upgrades'                'host/upgrade-incus.sh --check'
+  'Upgrade Incus on all members (rolling)'  'host/upgrade-incus.sh'
 )
 
 show_header() {

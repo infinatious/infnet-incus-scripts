@@ -142,6 +142,22 @@ incus image list -c lFtd
 
 Windows images: `distrobuilder repack-windows` (from `incus-extra`) injects the VirtIO drivers into a Windows ISO, the same job `lxd-imagebuilder repack-windows` did.
 
+### Upgrading Incus
+
+```bash
+host/upgrade-incus.sh --check   # installed vs. available, on every member; changes nothing
+host/upgrade-incus.sh           # rolling upgrade of every member, this host last
+```
+
+Both are also in the `start.sh` menu. Run them as your normal user on any member: the script uses `sudo` locally and `ssh -t` + `sudo` on the other members (by their cluster address), so every member needs this repository at the same path and SSH access from the host you run it on. On a standalone server it only upgrades that host.
+
+- Upgrades only the `incus*` packages each member already has installed, the other members first and this host last. Instances keep running: restarting the Incus daemon doesn't stop containers or VMs. An upgraded member waits for the others before serving the cluster API again, so all members are done in one run. If one fails, fix it and re-run; members that are already current are skipped.
+- **UI branding** is re-applied by its APT hook.
+- **UEFI boot logo:** if the new package ships the same VM firmware, the logo's APT hook puts it back. If it ships new firmware, the hook keeps Zabbly's (stock logo), and the script then rebuilds the logo once on this host (~10 minutes, log in `/tmp/infnet-uefi-build.*.log`), copies it to every member that had the logo, and applies it there. Members that never had the logo are left alone.
+- Running VMs keep their old QEMU and firmware until they are restarted.
+
+Zabbly's `daily` channel isn't an upgrade path from `stable`: its versions (`1:0~…`) sort below the stable ones, so apt never offers them.
+
 ---
 
 ## Clustering
@@ -364,7 +380,7 @@ sudo ./branding/uefi-logo.sh revert   # back to the stock firmware
 
 ## Scripts
 
-`./start.sh` is a main menu for everything below: it lists the scripts, runs the chosen one without arguments (so it prompts for what it needs), and returns to the menu. It also offers dry runs of the backup and DNS sync, and the host maintenance scripts (with `sudo`; host setup never wipes the disk from the menu).
+`./start.sh` is a main menu for everything below: it lists the scripts, runs the chosen one without arguments (so it prompts for what it needs), and returns to the menu. It also offers dry runs of the backup and DNS sync, the host maintenance scripts (with `sudo`; host setup never wipes the disk from the menu), and the Incus upgrade check and rolling upgrade (see [Upgrading Incus](#upgrading-incus)).
 
 - `deploy-project.sh` creates a project, its OVN network, and Linux/Windows/Docker profiles.
 - `create-instance.sh` creates an instance from the chosen profile and image, and maps a public IP to it with 1:1 NAT.
