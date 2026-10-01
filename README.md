@@ -142,6 +142,24 @@ incus image list -c lFtd
 
 Windows images: `distrobuilder repack-windows` (from `incus-extra`) injects the VirtIO drivers into a Windows ISO, the same job `lxd-imagebuilder repack-windows` did.
 
+### Cluster health report
+
+```bash
+host/cluster-health.sh
+```
+
+A read-only report (also first under Host Tasks in `start.sh`) that marks each check OK, WARN or FAIL and exits 1 on any FAIL:
+
+- **Members:** status, roles, Incus version (all equal?), placement, number of database voters.
+- **OVN databases:** NB/SB leader, and how recently each member answered it, read on the leader.
+- **Gateways:** which host carries each project network's uplink traffic, flagged if it isn't an `ovn-chassis` member.
+- **Instances:** per member, and a WARN when a redundant set (names differing only in the `-ctNN`/`-vsNN` number) runs entirely on one member. Also any instance in Error state.
+- **Storage:** pool usage per member (WARN at 80 %, FAIL at 90 %).
+- **Backups:** newest backup per running instance (WARN after `BACKUP_WARN_HOURS`, default 36; FAIL after `BACKUP_FAIL_HOURS`, default 192), the last run record, and on every member the backup timer, its last result and the NFS mount.
+- **Hosts:** pending reboot, UEFI boot logo status, and every NFS mount in `/etc/fstab`.
+
+It uses `sudo` locally (OVN status, the root-only backup folders), and `ssh` plus `sudo` to the other members by cluster address for the per-host checks. Members it can't reach over ssh show as WARN.
+
 ### Upgrading Incus
 
 ```bash
@@ -274,6 +292,18 @@ The NIC keys the scripts set are `security.acls=<instance>`, `security.acls.defa
 
 ---
 
+### Managing an instance's firewall
+
+```bash
+./firewall-manager.sh                                                       # interactive
+./firewall-manager.sh --project-id 23 --instance pd23-mcrft-ct01 --list
+./firewall-manager.sh --project-id 23 --instance pd23-mcrft-ct01 --add tcp:25001 --description Minecraft
+./firewall-manager.sh --project-id 23 --instance pd23-mcrft-ct01 --add tcp:8443 --source infnet --description Crafty
+./firewall-manager.sh --project-id 23 --instance pd23-mcrft-ct01 --remove 6
+```
+
+It edits the instance's own ACL. `--add` takes `tcp`, `udp`, `both` (one rule each), `icmp4` or `icmp6`, with ports as a number, range or list (`tcp:8000-8100`, `udp:53,123`). `--source` limits a rule to CIDRs, and `infnet` means `10.100.0.0/16`. `--remove N` uses the numbers `--list` shows. Changes apply immediately. The interactive menu asks before removing the SSH/RDP rule, and the script warns if the ACL isn't attached to the instance's NIC.
+
 ## Authentik SSO
 
 Incus accepts Authentik logins for both the web UI and the CLI.
@@ -385,8 +415,8 @@ sudo ./branding/uefi-logo.sh revert   # back to the stock firmware
 | Category | Tasks |
 |---|---|
 | 1) Project Manager | deploy a project; delete an empty project; delete a project with all its instances (`--delete-instances`); add missing profiles to one project or to all projects; update profile payloads in all projects |
-| 2) Host Tasks | check for Incus upgrades; rolling upgrade of all members (see [Upgrading Incus](#upgrading-incus)); re-run host setup (`sudo`, never wipes the disk from the menu); re-apply web UI branding (`sudo`); UEFI boot logo status |
-| 3) Instance Manager | create, resize, delete an instance |
+| 2) Host Tasks | cluster health report; check for Incus upgrades; rolling upgrade of all members (see [Upgrading Incus](#upgrading-incus)); re-run host setup (`sudo`, never wipes the disk from the menu); re-apply web UI branding (`sudo`); UEFI boot logo status |
+| 3) Instance Manager | create, resize, delete an instance; manage an instance's firewall (open/close ports) |
 | 4) Backup Manager | back up now, dry run, restore an instance |
 | 5) Misc | sync DNS records (and dry run), manage images and aliases |
 

@@ -54,6 +54,7 @@ MENU_1=(
   'Update profile payloads in all projects'       'deploy-project.sh --all-projects --update-payloads'
 )
 MENU_2=(
+  'Cluster health report'                         'host/cluster-health.sh'
   'Check for Incus upgrades'                      'host/upgrade-incus.sh --check'
   'Upgrade Incus on all members (rolling)'        'host/upgrade-incus.sh'
   'Re-run host setup (sudo, no disk wipe)'        'sudo host/setup-incus-host.sh'
@@ -64,6 +65,7 @@ MENU_3=(
   'Create an instance'                            'create-instance.sh'
   'Resize an instance'                            'resize-instance.sh'
   'Delete an instance'                            'delete-instance.sh'
+  'Manage an instance firewall (open/close ports)' 'firewall-manager.sh'
 )
 MENU_4=(
   'Back up instances now'                         'backup/backup-instances.sh'
