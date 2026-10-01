@@ -448,7 +448,7 @@ fw_create_acl "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PROFILE_FAMILY}" \
   || { remove_new_instance; fail "unable to create firewall ACL '${INSTANCE_NAME}'; the instance was removed."; }
 mapfile -t FW_NIC_KEYS < <(fw_nic_keys "${INSTANCE_NAME}")
 
-DNS_FQDN="${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}"
+DNS_FQDN="$(dns_instance_names "${INSTANCE_NAME}" "${PROJECT_NAME}" | paste -sd' ' | sed 's/ / and /')"
 INSTANCE_IPV4=''
 if [[ -n "${PUBLIC_IPV4}" ]]; then
   INSTANCE_IPV4="$(nat_allocate_internal_address "${NETWORK_NAME}" "${PROJECT_NAME}")" \
@@ -469,7 +469,7 @@ if ! incus start "${INSTANCE_NAME}" --project "${PROJECT_NAME}"; then
 fi
 
 if [[ -n "${PUBLIC_IPV4}" ]]; then
-  dns_register_record "${DNS_FQDN}" "${PUBLIC_IPV4}" || true
+  dns_register_instance "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PUBLIC_IPV4}" || true
 else
   echo "No public IP, so no DNS record is registered for '${DNS_FQDN}'."
 fi

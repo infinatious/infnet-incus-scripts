@@ -430,7 +430,7 @@ sudo ./branding/uefi-logo.sh revert   # back to the stock firmware
 - `manage-images.sh` lists the `default` project's images (the ones every project launches from), imports new ones from the `images:` server, adds/renames/removes aliases, and deletes images.
 - `backup/backup-instances.sh` exports instances to NFS. Runs nightly from `infnet-incus-backup.timer`.
 - `backup/restore-instance.sh` restores an instance, including its 1:1 NAT.
-- `dns/sync-dns-records.sh` creates or corrects the Technitium record of every instance.
+- `dns/sync-dns-records.sh` creates or corrects the Technitium records of every instance and project.
 - `lib/public-ip.sh` and `dns/technitium-dns.sh` are shared helpers, sourced by the scripts above.
 - `host/setup-incus-host.sh` builds the host ([Host setup](#host-setup)); `host/cluster-enable.sh` and `host/cluster-join.sh` grow it into a cluster ([Clustering](#clustering)); `host/common.sh` holds their shared steps; `branding/apply-ui-branding.sh` brands the UI.
 
@@ -506,6 +506,20 @@ Growing the root disk of a running instance stops and restarts it (after confirm
 ```
 
 Refuses to run while the project has instances unless `--delete-instances` is given, which deletes each one as `delete-instance.sh` does. `--yes` skips that confirmation.
+
+#### DNS names
+
+All records go into the one Technitium zone (`TECHNITIUM_ZONE`, default `infnet`), shared by both sites:
+
+| Name | Points at | Written by |
+|---|---|---|
+| `<instance>.infnet` | the instance's public IP | `create-instance.sh` (removed by `delete-instance.sh` / `delete-project.sh`) |
+| `<instance>.<project>.infnet` | the same public IP | the same scripts |
+| `<project>.infnet` | the project network's gateway, `<IPV4_SUBNET_PREFIX>.<id>.1` | `deploy-project.sh` (removed by `delete-project.sh`) |
+
+Instance names are unique across sites. Project names aren't (both sites have `infra-dns` and `infra-edge`), so each site only adds or removes its own gateway address in `<project>.infnet`, which then lists both. `deploy-project.sh` also sets the OVN network's `dns.domain` to `<project>.infnet`, so new instances' OVN-internal names are `<instance>.<project>.infnet`. Existing instances keep their old internal name (`<instance>.incus`) until restarted.
+
+Instances can only resolve these names if their DNS server knows the `infnet` zone: the uplink's `dns.nameservers` must point at a Technitium server that hosts it (or a secondary/forwarder of it).
 
 #### `sync-dns-records.sh`
 

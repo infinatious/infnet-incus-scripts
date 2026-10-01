@@ -127,7 +127,7 @@ if [[ -n "${INSTANCE_LIST}" ]]; then
       if [[ -n "${PUBLIC_IP}" ]]; then
         echo "Releasing public IP '${PUBLIC_IP}' (network forward on '${NETWORK_NAME}')..."
         run nat_release "${PROJECT_NAME}" "${NETWORK_NAME}" "${PUBLIC_IP}"
-        dns_deregister_record "${INSTANCE_NAME}.${TECHNITIUM_ZONE:-infnet}" "${PUBLIC_IP}" || true
+        dns_deregister_instance "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PUBLIC_IP}" || true
       fi
       run fw_delete_acl "${INSTANCE_NAME}" "${PROJECT_NAME}"
     done < <(printf '%s\n' "${INSTANCE_LIST}" | sed '/^$/d')
@@ -162,6 +162,10 @@ for ACL_NAME in "${ACL_NAMES[@]}"; do
 done
 
 if incus network show "${NETWORK_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1; then
+  GATEWAY_IPV4="$(incus network get "${NETWORK_NAME}" ipv4.address --project "${PROJECT_NAME}" 2>/dev/null)"
+  if [[ -n "${GATEWAY_IPV4}" && "${GATEWAY_IPV4}" != 'none' ]]; then
+    dns_deregister_project "${PROJECT_NAME}" "${GATEWAY_IPV4%/*}" || true
+  fi
   echo "Deleting network '${NETWORK_NAME}'..."
   run incus network delete "${NETWORK_NAME}" --project "${PROJECT_NAME}"
 else

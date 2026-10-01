@@ -18,6 +18,9 @@ source "${ENV_FILE}"
 [[ -f "${SCRIPT_DIR}/lib/public-ip.sh" ]] || { echo "Error: ${SCRIPT_DIR}/lib/public-ip.sh not found." >&2; exit 1; }
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/public-ip.sh"
+[[ -f "${SCRIPT_DIR}/dns/technitium-dns.sh" ]] || { echo "Error: ${SCRIPT_DIR}/dns/technitium-dns.sh not found." >&2; exit 1; }
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/dns/technitium-dns.sh"
 
 : "${UPLINK_NETWORK:?UPLINK_NETWORK not set in ${ENV_FILE}}"
 : "${IPV4_SUBNET_PREFIX:?IPV4_SUBNET_PREFIX not set in ${ENV_FILE}}"
@@ -350,7 +353,13 @@ run incus network create "${NETWORK_NAME}" \
   ipv4.address="${IPV4_ADDRESS}" \
   ipv4.nat=true \
   ipv6.address=none \
+  dns.domain="$(dns_project_name "${PROJECT_NAME}")" \
   volatile.network.ipv4.address="${ROUTER_IPV4}" </dev/null
+
+# <project>.<zone> -> this network's gateway. The OVN network serves the same
+# domain to its instances, so <instance>.<project>.<zone> also resolves to
+# their internal address from inside the project.
+dns_register_project "${PROJECT_NAME}" "${IPV4_ADDRESS%/*}" || true
 
 run incus project set "${PROJECT_NAME}" restricted.networks.access="${NETWORK_NAME}"
 run incus project set "${PROJECT_NAME}" restricted.devices.nic=managed
@@ -366,6 +375,7 @@ echo
 echo 'Deployment complete.'
 echo "Project : ${PROJECT_NAME}"
 echo "Network : ${NETWORK_NAME} (${IPV4_ADDRESS}, NAT ${ROUTER_IPV4})"
+echo "DNS     : $(dns_project_name "${PROJECT_NAME}") -> ${IPV4_ADDRESS%/*}; instances as <instance>.$(dns_zone) and <instance>.$(dns_project_name "${PROJECT_NAME}")"
 echo "Uplink  : ${UPLINK_NETWORK}"
 echo "MTU     : ${OVN_MTU}"
 echo "Profiles: ${PROJECT_NAME}-linux, ${PROJECT_NAME}-win, ${PROJECT_NAME}-linux-docker"
