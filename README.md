@@ -500,6 +500,34 @@ The instance is named `<env prefix><project id>-<service code>-<ct|vs><nn>` (e.g
 
 The internal address is read from the guest (needs the `incus-agent` in VMs) or, failing that, from the address OVN assigned to the NIC - so VMs without the agent, such as a fresh Windows install, still work.
 
+- `--empty` creates a VM with no image and leaves it stopped, with the NIC, ACL, 1:1 NAT and DNS done as usual. It's the target for an imported disk (see [Importing a VM disk](#importing-a-vm-disk-eg-from-proxmox)).
+- `--target <member>` puts the instance on that cluster member instead of letting Incus choose.
+
+#### Importing a VM disk (e.g. from Proxmox)
+
+Done for the RDS servers (inf-10029 → `pd24-rdsts-vs01`, 2026-10-01). The disk moves with ZFS, so only a final incremental sync happens during downtime.
+
+1. **Target VM:** `./create-instance.sh --project-id <ID> --environment p --service-code <code> --profile-type win --cpu <n> --ram <GiB> --disk <same size as the source> --public-ip random --empty --target <member>`
+2. **Disk bus:** a Windows guest whose disk was SATA/IDE in Proxmox may lack the VirtIO SCSI driver, so attach the disk as NVMe (Windows has the driver in-box): `incus config device set <vm> root io.bus=nvme --project <P>`. The NIC stays virtio-net; Proxmox VMs with a `virtio` NIC already have its driver.
+3. **Stage while the source runs:** snapshot the source zvol and stream it into a holding dataset on the target member. The Proxmox host can't reach the members directly, so relay through the workstation:
+   `ssh root@<pve> 'zfs snapshot zpool/vm-<id>-disk-0@incus1; zfs send -c zpool/vm-<id>-disk-0@incus1' | ssh <member> 'sudo zfs recv -u zpool/import/vm-<id>-disk-0'`
+4. **Cutover:**
+   - Shut the source down from inside Windows. It may ignore Proxmox's ACPI shutdown when users are signed in. Also run `qm set <id> --onboot 0`.
+   - Run a second snapshot `@incus2` and `zfs send -i @incus1 …` the same way (seconds).
+5. **Write the disk.** Incus keeps a stopped VM's zvol at `volmode=none` (no `/dev/zvol` node), so expose it for the copy only:
+   ```bash
+   v=zpool/virtual-machines/<project>_<vm>.block
+   sudo zfs set volmode=dev $v && sudo udevadm settle
+   sudo dd if=/dev/zvol/zpool/import/vm-<id>-disk-0 of=/dev/zvol/$v bs=4M conv=sparse,fsync
+   sudo zfs set volmode=none $v
+   ```
+6. **Start:** `incus start <vm> --project <P>`.
+   - UEFI Windows boots via its fallback `\EFI\Boot\bootx64.efi` with Incus' Secure Boot keys.
+   - The new NIC is a new adapter on DHCP, which gets the pinned internal address. Any old static IP stays on the hidden old adapter.
+7. **Rollback:** stop the Incus VM and `qm start <id>`. Remove the staging dataset and the `@incus*` snapshots only after the move is confirmed.
+
+Domain-joined Windows keeps its machine account. It needs outbound access from its public IP to the DCs, and DNS that resolves the AD domain (here the uplink's Technitium servers forward the AD zone to the DCs). Windows registers its internal 10.x address in AD DNS, so turn off "Register this connection's addresses in DNS" on the NIC and point the users' name at the public IP.
+
 #### `resize-instance.sh`
 
 ```bash
