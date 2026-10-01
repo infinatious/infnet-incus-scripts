@@ -20,7 +20,6 @@ ssh_pwauth: false
 packages:
   - openssh-server
   - qemu-guest-agent
-  - btop
   - git
   - curl
   - wget
@@ -32,4 +31,9 @@ packages:
 
 runcmd:
   - [systemctl, enable, --now, qemu-guest-agent]
+  # Not in `packages`: AlmaLinux/Rocky only ship btop in EPEL, and one missing
+  # package makes dnf refuse the whole list (openssh-server included).
+  - sh -c 'command -v btop >/dev/null || dnf -y -q install btop || apt-get -y -q install btop || true'
+  # AlmaLinux/Rocky containers don't enable sshd when the package is installed.
+  - sh -c 'systemctl enable --now sshd 2>/dev/null || systemctl enable --now ssh 2>/dev/null || true'
   - sudo bash -c "curl -sSL https://raw.githubusercontent.com/infinatious/infnet-incus-scripts/refs/heads/main/post-install.sh | bash"

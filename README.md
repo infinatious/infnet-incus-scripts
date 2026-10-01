@@ -396,6 +396,12 @@ Projects created before a profile was added (e.g. the Docker one) get it with:
 
 It creates whichever of the three standard profiles the project lacks and leaves the existing ones untouched.
 
+Profiles keep a copy of the cloud-init payload from when they were created. After editing `cloud-init-user-data.yaml` or `cloudbase-init-user-data.yaml`, push the new payload into a project's existing profiles (instances created afterwards get it; CPU, memory and disk settings stay as they are):
+
+```bash
+./deploy-project.sh --project-name demo --update-payloads
+```
+
 ##### Docker profile
 
 `demo-linux-docker` is for running Docker inside a system container rather than a full VM: the same 1 CPU, 2 GiB, 20 GiB defaults as `demo-linux`, plus `security.nesting=true` (so dockerd can create its own namespaces, cgroups and overlay mounts while the container stays unprivileged), and the Linux cloud-init payload plus Docker Engine and the Compose plugin from Docker's own repos (`get.docker.com` on Debian/Ubuntu/Fedora, the RHEL repo on AlmaLinux/Rocky) with every user in the `docker` group. The payload is generated from `cloud-init-user-data.yaml` when the profile is created, so users and keys stay defined in one place; re-create the profile after editing that file. `create-instance.sh --profile-type docker` offers container images only and opens SSH like any Linux instance; published container ports still need an ingress rule on the instance's ACL (see [Firewall](#firewall)).

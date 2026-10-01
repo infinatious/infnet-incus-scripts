@@ -33,6 +33,7 @@ usage() {
   cat <<'EOF'
 Usage: deploy-project.sh --project-name NAME --project-id ID
        deploy-project.sh --project-name NAME --add-missing-profiles
+       deploy-project.sh --project-name NAME --update-payloads
 
 Creates a project, its OVN network and three profiles: NAME-linux, NAME-win
 and NAME-linux-docker (the Linux profile plus security.nesting and Docker
@@ -45,11 +46,17 @@ Options:
                           default NAT address (<PROJECT_NAT_IPV4_PREFIX>.<id>).
   --add-missing-profiles  For an existing project, create whichever of the
                           three profiles it lacks and leave the rest alone.
+  --update-payloads       For an existing project, rewrite the cloud-init /
+                          cloudbase-init payload of its three standard profiles
+                          from the current files (profiles copy the payload when
+                          they are created). Only affects instances created
+                          afterwards; CPU, memory and disk are left alone.
   --help                  Show this help message.
 
 Examples:
   ./deploy-project.sh --project-name demo --project-id 42
   ./deploy-project.sh --project-name infra-edge --add-missing-profiles
+  ./deploy-project.sh --project-name infra-edge --update-payloads
 EOF
 }
 
@@ -155,13 +162,40 @@ create_standard_profiles() {
   fi
 }
 
+# Rewrites the payload of each standard profile that exists.
+update_profile_payloads() {
+  local name user_data
+  for name in "${PROJECT_NAME}-linux" "${PROJECT_NAME}-win" "${PROJECT_NAME}-linux-docker"; do
+    if ! incus profile show "${name}" --project "${PROJECT_NAME}" >/dev/null 2>&1; then
+      echo "Profile '${name}' doesn't exist, skipping (see --add-missing-profiles)."
+      continue
+    fi
+    case "${name}" in
+      *-linux) user_data="$(cat "${CLOUD_INIT_FILE}")" ;;
+      *-win) user_data="$(cat "${CLOUDBASE_INIT_FILE}")" ;;
+      *-linux-docker) user_data="$(docker_user_data)" || fail "unable to build the Docker cloud-init payload." ;;
+    esac
+    if [[ "$(incus profile get "${name}" cloud-init.user-data --project "${PROJECT_NAME}")" == "${user_data}" ]]; then
+      echo "Profile '${name}' payload is already current."
+    else
+      run incus profile set "${name}" cloud-init.user-data="${user_data}" --project "${PROJECT_NAME}"
+      echo "Updated the payload of profile '${name}'."
+    fi
+  done
+}
+
 PROJECT_NAME=''
 PROJECT_ID=''
 ADD_MISSING_PROFILES=''
+UPDATE_PAYLOADS=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --add-missing-profiles)
       ADD_MISSING_PROFILES='yes'
+      shift
+      ;;
+    --update-payloads)
+      UPDATE_PAYLOADS='yes'
       shift
       ;;
     --project-name)
@@ -188,7 +222,7 @@ if [[ -z "${PROJECT_NAME}" ]]; then
   read -r -p 'Project name: ' PROJECT_NAME
 fi
 
-if [[ -n "${ADD_MISSING_PROFILES}" ]]; then
+if [[ -n "${ADD_MISSING_PROFILES}" || -n "${UPDATE_PAYLOADS}" ]]; then
   [[ -n "${PROJECT_NAME}" ]] || fail 'project name cannot be empty.'
   [[ -f "${CLOUD_INIT_FILE}" ]] || fail "cloud-init file '${CLOUD_INIT_FILE}' not found."
   [[ -f "${CLOUDBASE_INIT_FILE}" ]] || fail "cloudbase-init file '${CLOUDBASE_INIT_FILE}' not found."
@@ -196,7 +230,8 @@ if [[ -n "${ADD_MISSING_PROFILES}" ]]; then
   NETWORK_NAME="${PROJECT_NAME}"
   incus network show "${NETWORK_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 \
     || fail "project '${PROJECT_NAME}' has no network named '${NETWORK_NAME}'."
-  create_standard_profiles
+  [[ -n "${ADD_MISSING_PROFILES}" ]] && create_standard_profiles
+  [[ -n "${UPDATE_PAYLOADS}" ]] && update_profile_payloads
   exit 0
 fi
 
