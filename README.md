@@ -279,6 +279,18 @@ On a physical uplink, OVN answers ARP for the forward addresses itself (`ovn.ing
 
 OVN ACLs are stateful (replies to the instance's own connections get back in), and Incus automatically allows DHCP, DNS and ping to the network's router, so addressing and name resolution keep working. Instances without a public IP get the same ACL.
 
+The ACL only filters traffic that reaches an instance **through the project router**, i.e. from outside its network (public IP, other projects, INFNET). Traffic between instances on the **same** project network isn't blocked by the default inbound reject: senders have egress `allow`, and OVN ACLs are stateful. Verified on us-west 2026-10-01.
+
+### Routing a remote subnet through a gateway instance
+
+An instance can act as a router for another subnet, e.g. a WireGuard site-to-site gateway. Set the subnet as a route on its NIC, and the project router forwards that subnet to it:
+
+```bash
+incus config device set <gateway> eth0 ipv4.routes=<remote-subnet> --project <project>
+```
+
+That also lets the gateway send traffic with the remote subnet's source addresses (OVN port security accepts them). The gateway instance needs IP forwarding on, and an ACL rule allowing its **own** project subnet (all TCP/UDP), which forwarded traffic and its replies need. Instances behind it need no rules for traffic from the remote side. Containers using WireGuard also need `linux.kernel_modules=wireguard`.
+
 **Opening more ports** for one machine means adding an ingress rule to its ACL:
 
 - Web UI: *Networks > ACLs* in the instance's project, open the ACL with the instance's name, add an **ingress** rule (action `allow`, protocol, destination port).
