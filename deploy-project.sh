@@ -34,6 +34,7 @@ usage() {
 Usage: deploy-project.sh --project-name NAME --project-id ID
        deploy-project.sh --project-name NAME --add-missing-profiles
        deploy-project.sh --project-name NAME --update-payloads
+       deploy-project.sh --all-projects --add-missing-profiles|--update-payloads
 
 Creates a project, its OVN network and three profiles: NAME-linux, NAME-win
 and NAME-linux-docker (the Linux profile plus security.nesting and Docker
@@ -46,6 +47,9 @@ Options:
                           default NAT address (<PROJECT_NAT_IPV4_PREFIX>.<id>).
   --add-missing-profiles  For an existing project, create whichever of the
                           three profiles it lacks and leave the rest alone.
+  --all-projects          With --add-missing-profiles or --update-payloads:
+                          do it for every project these scripts manage (the
+                          ones described "Project ID: N") instead of one.
   --update-payloads       For an existing project, rewrite the cloud-init /
                           cloudbase-init payload of its three standard profiles
                           from the current files (profiles copy the payload when
@@ -57,6 +61,7 @@ Examples:
   ./deploy-project.sh --project-name demo --project-id 42
   ./deploy-project.sh --project-name infra-edge --add-missing-profiles
   ./deploy-project.sh --project-name infra-edge --update-payloads
+  ./deploy-project.sh --all-projects --add-missing-profiles
 EOF
 }
 
@@ -188,8 +193,13 @@ PROJECT_NAME=''
 PROJECT_ID=''
 ADD_MISSING_PROFILES=''
 UPDATE_PAYLOADS=''
+ALL_PROJECTS=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --all-projects)
+      ALL_PROJECTS='yes'
+      shift
+      ;;
     --add-missing-profiles)
       ADD_MISSING_PROFILES='yes'
       shift
@@ -217,6 +227,25 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# --all-projects: run the profile action once per managed project.
+if [[ -n "${ALL_PROJECTS}" ]]; then
+  [[ -n "${ADD_MISSING_PROFILES}${UPDATE_PAYLOADS}" ]] \
+    || fail '--all-projects needs --add-missing-profiles and/or --update-payloads.'
+  [[ -z "${PROJECT_NAME}${PROJECT_ID}" ]] || fail '--all-projects cannot be combined with --project-name or --project-id.'
+  ACTION_ARGS=()
+  [[ -n "${ADD_MISSING_PROFILES}" ]] && ACTION_ARGS+=(--add-missing-profiles)
+  [[ -n "${UPDATE_PAYLOADS}" ]] && ACTION_ARGS+=(--update-payloads)
+  mapfile -t ALL_PROJECT_NAMES < <(incus project list -f json | jq -r '.[] | select(.description | test("^Project ID: [0-9]+$")) | .name' | sort)
+  (( ${#ALL_PROJECT_NAMES[@]} > 0 )) || fail 'no managed projects (described "Project ID: N") found.'
+  FAILED=()
+  for name in "${ALL_PROJECT_NAMES[@]}"; do
+    echo "== ${name}"
+    "$0" --project-name "${name}" "${ACTION_ARGS[@]}" </dev/null || FAILED+=("${name}")
+  done
+  (( ${#FAILED[@]} == 0 )) || fail "failed for: ${FAILED[*]}"
+  exit 0
+fi
 
 if [[ -z "${PROJECT_NAME}" ]]; then
   read -r -p 'Project name: ' PROJECT_NAME

@@ -380,7 +380,17 @@ sudo ./branding/uefi-logo.sh revert   # back to the stock firmware
 
 ## Scripts
 
-`./start.sh` is a main menu for everything below: it lists the scripts, runs the chosen one without arguments (so it prompts for what it needs), and returns to the menu. It also offers dry runs of the backup and DNS sync, the host maintenance scripts (with `sudo`; host setup never wipes the disk from the menu), and the Incus upgrade check and rolling upgrade (see [Upgrading Incus](#upgrading-incus)).
+`./start.sh` is a main menu for everything below, under an INFNET banner with the Incus version, cluster members and projects. Pick a numbered category, then a task; each task runs its script without arguments (so it prompts for what it needs) and returns to that category. `b)` goes back, `e)` exits, and `NO_COLOR=1` turns the colors off.
+
+| Category | Tasks |
+|---|---|
+| 1) Project Manager | deploy a project; delete an empty project; delete a project with all its instances (`--delete-instances`); add missing profiles to one project or to all projects; update profile payloads in all projects |
+| 2) Host Tasks | check for Incus upgrades; rolling upgrade of all members (see [Upgrading Incus](#upgrading-incus)); re-run host setup (`sudo`, never wipes the disk from the menu); re-apply web UI branding (`sudo`); UEFI boot logo status |
+| 3) Instance Manager | create, resize, delete an instance |
+| 4) Backup Manager | back up now, dry run, restore an instance |
+| 5) Misc | sync DNS records (and dry run), manage images and aliases |
+
+`deploy-project.sh --all-projects --add-missing-profiles` (or `--update-payloads`) runs the profile action on every project these scripts manage, i.e. those described `Project ID: N`.
 
 - `deploy-project.sh` creates a project, its OVN network, and Linux/Windows/Docker profiles.
 - `create-instance.sh` creates an instance from the chosen profile and image, and maps a public IP to it with 1:1 NAT.
