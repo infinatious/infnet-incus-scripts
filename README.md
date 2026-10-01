@@ -513,8 +513,8 @@ All records go into the one Technitium zone (`TECHNITIUM_ZONE`, default `infnet`
 
 | Name | Points at | Written by |
 |---|---|---|
-| `<instance>.infnet` | the instance's public IP | `create-instance.sh` (removed by `delete-instance.sh` / `delete-project.sh`) |
-| `<instance>.<project>.infnet` | the same public IP | the same scripts |
+| `<instance>.infnet` | the instance's public IP (only instances that have one) | `create-instance.sh` (removed by `delete-instance.sh` / `delete-project.sh`) |
+| `<instance>.<project>.infnet` | the instance's **internal** address (`10.x.x.y`); every instance, public IP or not | `create-instance.sh` once the address is known (removed by the same delete scripts) |
 | `<project>.infnet` | the project network's gateway, `<IPV4_SUBNET_PREFIX>.<id>.1` | `deploy-project.sh` (removed by `delete-project.sh`) |
 
 Instance names are unique across sites. Project names aren't (both sites have `infra-dns` and `infra-edge`), so each site only adds or removes its own gateway address in `<project>.infnet`, which then lists both. `deploy-project.sh` also sets the OVN network's `dns.domain` to `<project>.infnet`, so new instances' OVN-internal names are `<instance>.<project>.infnet`. Existing instances keep their old internal name (`<instance>.incus`) until restarted.

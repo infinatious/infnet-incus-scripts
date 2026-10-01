@@ -448,7 +448,8 @@ fw_create_acl "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PROFILE_FAMILY}" \
   || { remove_new_instance; fail "unable to create firewall ACL '${INSTANCE_NAME}'; the instance was removed."; }
 mapfile -t FW_NIC_KEYS < <(fw_nic_keys "${INSTANCE_NAME}")
 
-DNS_FQDN="$(dns_instance_names "${INSTANCE_NAME}" "${PROJECT_NAME}" | paste -sd' ' | sed 's/ / and /')"
+DNS_FQDN="$(dns_public_name "${INSTANCE_NAME}")"
+DNS_INTERNAL_FQDN="$(dns_internal_name "${INSTANCE_NAME}" "${PROJECT_NAME}")"
 INSTANCE_IPV4=''
 if [[ -n "${PUBLIC_IPV4}" ]]; then
   INSTANCE_IPV4="$(nat_allocate_internal_address "${NETWORK_NAME}" "${PROJECT_NAME}")" \
@@ -469,7 +470,7 @@ if ! incus start "${INSTANCE_NAME}" --project "${PROJECT_NAME}"; then
 fi
 
 if [[ -n "${PUBLIC_IPV4}" ]]; then
-  dns_register_instance "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PUBLIC_IPV4}" || true
+  dns_register_public "${INSTANCE_NAME}" "${PUBLIC_IPV4}" || true
 else
   echo "No public IP, so no DNS record is registered for '${DNS_FQDN}'."
 fi
@@ -494,6 +495,11 @@ done
 # Internal OVN addresses aren't reachable from INFNET, so a VM without a
 # public IP that never reports one is fine.
 [[ -n "${INSTANCE_IPV4}" ]] || INSTANCE_IPV4='unknown'
+if [[ "${INSTANCE_IPV4}" != 'unknown' ]]; then
+  dns_register_internal "${INSTANCE_NAME}" "${PROJECT_NAME}" "${INSTANCE_IPV4}" || true
+else
+  echo "Internal address unknown, so '${DNS_INTERNAL_FQDN}' isn't registered yet; dns/sync-dns-records.sh adds it later."
+fi
 
 if [[ -n "${DESCRIPTION_SUFFIX_ARG}" ]]; then
   DESCRIPTION_SUFFIX="${DESCRIPTION_SUFFIX_ARG}"
@@ -537,6 +543,7 @@ echo "Instance IP : ${INSTANCE_IPV4}"
 echo "Public IP   : ${PUBLIC_IPV4:-none}${PUBLIC_IPV4:+ (1:1 NAT)}"
 echo "Firewall    : ACL '${INSTANCE_NAME}' - inbound ICMP and ${FW_SERVICE} (tcp/${FW_PORT}) only"
 echo "Description : ${DESCRIPTION_TEXT}"
-if [[ -n "${PUBLIC_IPV4}" ]] && technitium_configured; then
-  echo "DNS         : ${DNS_FQDN} -> ${PUBLIC_IPV4}"
+if technitium_configured; then
+  [[ -n "${PUBLIC_IPV4}" ]] && echo "DNS         : ${DNS_FQDN} -> ${PUBLIC_IPV4}"
+  [[ "${INSTANCE_IPV4}" != 'unknown' ]] && echo "DNS         : ${DNS_INTERNAL_FQDN} -> ${INSTANCE_IPV4}"
 fi

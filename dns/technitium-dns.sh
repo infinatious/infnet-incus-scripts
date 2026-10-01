@@ -6,8 +6,10 @@
 # are printed as warnings and never abort the calling script.
 #
 # Names, all in the one TECHNITIUM_ZONE (default infnet):
-#   <instance>.<zone>             instance's public IP (unique across sites)
-#   <instance>.<project>.<zone>   the same, under its project
+#   <instance>.<zone>             instance's public IP (unique across sites;
+#                                 only instances with one)
+#   <instance>.<project>.<zone>   instance's internal address (10.x.x.y), for
+#                                 every instance
 #   <project>.<zone>              the project network's gateway (10.x.x.1). Both
 #                                 sites can have a project of the same name, so
 #                                 each site only adds and removes its own
@@ -51,24 +53,37 @@ dns_register_record() {
 
 dns_zone() { printf '%s\n' "${TECHNITIUM_ZONE:-infnet}"; }
 
-# The two names an instance's public IP is published under.
-dns_instance_names() {
-  local instance="$1" project="$2"
-  printf '%s\n' "${instance}.$(dns_zone)" "${instance}.${project}.$(dns_zone)"
-}
-
+dns_public_name() { printf '%s\n' "$1.$(dns_zone)"; }
+dns_internal_name() { printf '%s\n' "$1.$2.$(dns_zone)"; }
 dns_project_name() { printf '%s\n' "$1.$(dns_zone)"; }
 
-dns_register_instance() {
-  local instance="$1" project="$2" ip="$3" name rc=0
-  while read -r name; do dns_register_record "${name}" "${ip}" || rc=1; done < <(dns_instance_names "${instance}" "${project}")
+# <instance>.<zone> -> public IP.
+dns_register_public() { dns_register_record "$(dns_public_name "$1")" "$2"; }
+# <instance>.<project>.<zone> -> internal address.
+dns_register_internal() { dns_register_record "$(dns_internal_name "$1" "$2")" "$3"; }
+
+# Removes an instance's names: the public one (if it had a public IP) and the
+# internal one, whatever address it currently holds.
+dns_deregister_instance() {
+  local instance="$1" project="$2" public_ip="${3:-}" name ip rc=0
+  [[ -z "${public_ip}" ]] || dns_deregister_record "$(dns_public_name "${instance}")" "${public_ip}" || rc=1
+  technitium_configured || return "${rc}"
+  name="$(dns_internal_name "${instance}" "${project}")"
+  while read -r ip; do
+    [[ -n "${ip}" ]] && { dns_deregister_record "${name}" "${ip}" || rc=1; }
+  done < <(dns_lookup_record_ips "${name}" || true)
   return "${rc}"
 }
 
-dns_deregister_instance() {
-  local instance="$1" project="$2" ip="$3" name rc=0
-  while read -r name; do dns_deregister_record "${name}" "${ip}" || rc=1; done < <(dns_instance_names "${instance}" "${project}")
-  return "${rc}"
+# An instance's internal IPv4 on its eth0, from its running state, else the
+# address pinned on the NIC.
+instance_internal_ipv4() {
+  local instance="$1" project="$2" ip
+  ip="$(incus query "/1.0/instances/${instance}/state?project=${project}" 2>/dev/null \
+    | jq -r '.network.eth0.addresses[]? | select(.family == "inet" and .scope == "global") | .address' | head -n1)"
+  [[ -n "${ip}" ]] || ip="$(incus query "/1.0/instances/${instance}?project=${project}" 2>/dev/null \
+    | jq -r '.expanded_devices.eth0["ipv4.address"] // empty')"
+  printf '%s\n' "${ip}"
 }
 
 # Adds this site's gateway address to <project>.<zone>, leaving the other

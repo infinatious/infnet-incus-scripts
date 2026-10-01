@@ -127,8 +127,8 @@ if [[ -n "${INSTANCE_LIST}" ]]; then
       if [[ -n "${PUBLIC_IP}" ]]; then
         echo "Releasing public IP '${PUBLIC_IP}' (network forward on '${NETWORK_NAME}')..."
         run nat_release "${PROJECT_NAME}" "${NETWORK_NAME}" "${PUBLIC_IP}"
-        dns_deregister_instance "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PUBLIC_IP}" || true
       fi
+      dns_deregister_instance "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PUBLIC_IP}" || true
       run fw_delete_acl "${INSTANCE_NAME}" "${PROJECT_NAME}"
     done < <(printf '%s\n' "${INSTANCE_LIST}" | sed '/^$/d')
   else

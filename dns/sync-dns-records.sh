@@ -20,15 +20,17 @@ usage() {
   cat <<'EOF'
 Usage: sync-dns-records.sh [--dry-run]
 
-Walks every instance in every project that has a 1:1 NAT public IP
-(user.public_ipv4) and makes sure Technitium has an A record for it under
-both <instance>.<zone> and <instance>.<project>.<zone>. For every managed
-project (described "Project ID: N") it also makes sure <project>.<zone> lists
-the project network's gateway (10.x.x.1; another site's gateway for a project
-of the same name is left alone) and that the network's DNS domain is
-<project>.<zone>. Missing records are created and records pointing at a stale
-IP are corrected; records that already match are left untouched.
-Instances without a public IP are skipped. On a cluster, run this from any
+Makes sure Technitium matches every instance in every project:
+  <instance>.<zone>             -> its 1:1 NAT public IP (user.public_ipv4),
+                                   for instances that have one
+  <instance>.<project>.<zone>   -> its internal address (10.x.x.y), for all
+and for every managed project (described "Project ID: N"):
+  <project>.<zone>              -> the project network's gateway (10.x.x.1);
+                                   another site's gateway for a project of the
+                                   same name is left alone
+plus the network's DNS domain set to <project>.<zone>. Missing records are
+created and records pointing at a stale address are corrected; records that
+already match are left untouched. On a cluster, run this from any
 one member - it covers every member, unlike backup-instances.sh.
 
 Options:
@@ -123,20 +125,20 @@ for PROJECT_NAME in "${PROJECT_NAMES[@]}"; do
     [[ -n "${INSTANCE_NAME}" ]] || continue
 
     PUBLIC_IP="$(incus config get "${INSTANCE_NAME}" user.public_ipv4 --project "${PROJECT_NAME}" 2>/dev/null || true)"
-    if [[ -z "${PUBLIC_IP}" ]]; then
-      SKIPPED=$((SKIPPED + 1))
-      continue
+    INTERNAL_IP="$(instance_internal_ipv4 "${INSTANCE_NAME}" "${PROJECT_NAME}")"
+    if [[ -n "${PUBLIC_IP}" ]]; then
+      sync_record "$(dns_public_name "${INSTANCE_NAME}")" "${PUBLIC_IP}" replace "public, project '${PROJECT_NAME}'"
     fi
-
-    while read -r FQDN; do
-      sync_record "${FQDN}" "${PUBLIC_IP}" replace "project '${PROJECT_NAME}'"
-    done < <(dns_instance_names "${INSTANCE_NAME}" "${PROJECT_NAME}")
+    if [[ -n "${INTERNAL_IP}" ]]; then
+      sync_record "$(dns_internal_name "${INSTANCE_NAME}" "${PROJECT_NAME}")" "${INTERNAL_IP}" replace "internal, project '${PROJECT_NAME}'"
+    fi
+    [[ -n "${PUBLIC_IP}${INTERNAL_IP}" ]] || SKIPPED=$((SKIPPED + 1))
   done
 done
 
 echo
 if [[ "${DRY_RUN}" == 'yes' ]]; then
-  echo "Dry run complete. Would create ${CREATED}, update ${UPDATED}; ${UNCHANGED} already correct, ${SKIPPED} skipped (no public IP)."
+  echo "Dry run complete. Would create ${CREATED}, update ${UPDATED}; ${UNCHANGED} already correct, ${SKIPPED} skipped (no address known)."
 else
-  echo "Sync complete. Created ${CREATED}, updated ${UPDATED}; ${UNCHANGED} already correct, ${SKIPPED} skipped (no public IP)."
+  echo "Sync complete. Created ${CREATED}, updated ${UPDATED}; ${UNCHANGED} already correct, ${SKIPPED} skipped (no address known)."
 fi

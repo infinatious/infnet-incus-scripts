@@ -180,10 +180,10 @@ run incus delete "${INSTANCE_NAME}" --project "${PROJECT_NAME}"
 if [[ -n "${PUBLIC_IP}" ]]; then
   echo "Releasing public IP '${PUBLIC_IP}' (network forward on '${NETWORK_NAME}')..."
   run nat_release "${PROJECT_NAME}" "${NETWORK_NAME}" "${PUBLIC_IP}"
-  dns_deregister_instance "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PUBLIC_IP}" || true
 else
   echo "No public IP found on instance '${INSTANCE_NAME}', skipping 1:1 NAT cleanup."
 fi
+dns_deregister_instance "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PUBLIC_IP}" || true
 
 echo "Deleting firewall ACL '${INSTANCE_NAME}' (if any)..."
 run fw_delete_acl "${INSTANCE_NAME}" "${PROJECT_NAME}"
