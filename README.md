@@ -154,7 +154,13 @@ A read-only report (also first under Host Tasks in `start.sh`) that marks each c
 - **OVN databases:** NB/SB leader, and how recently each member answered it, read on the leader.
 - **Gateways:** which host carries each project network's uplink traffic, flagged if it isn't an `ovn-chassis` member.
 - **Instances:** per member, and a WARN when a redundant set (names differing only in the `-ctNN`/`-vsNN` number) runs entirely on one member. Also any instance in Error state.
-- **Storage:** pool usage per member (WARN at 80 %, FAIL at 90 %).
+- **Resource check:** headroom per member, as bars (green < 70 %, yellow < 85 %, red above), each with absolute figures:
+  - **pool used:** WARN at 80 %, FAIL at 90 %.
+  - **RAM allocated:** the sum of `limits.memory` of the running instances on the member against host RAM, with what's unallocated. Stopped instances' allocation and instances without a limit are listed separately. WARN at 90 %.
+  - **RAM in use:** `MemTotal − MemAvailable`, counting the ZFS ARC above its minimum as free, since ZFS gives it back. WARN at 85 %, FAIL at 95 %.
+  - **CPU load:** the 5-minute load average as a % of the member's threads, plus the vCPUs allocated to running instances. WARN at 80 %, FAIL at 100 %.
+
+  The live figures come over ssh. Without it, RAM in use falls back to the Incus API (which counts the ARC as used), and CPU load is skipped.
 - **Backups:** newest backup per running instance (WARN after `BACKUP_WARN_HOURS`, default 36; FAIL after `BACKUP_FAIL_HOURS`, default 192), the last run record, and on every member the backup timer, its last result and the NFS mount.
 - **Hosts:** pending reboot, UEFI boot logo status, and every NFS mount in `/etc/fstab`.
 

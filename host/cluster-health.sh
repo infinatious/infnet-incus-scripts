@@ -209,16 +209,102 @@ done < <(jq -r '[.[] | select(.status == "Running") | {project, name, location, 
 mapfile -t ERRORED < <(jq -r '.[] | select(.status == "Error") | "\(.project)/\(.name) on \(.location)"' <<< "${INSTANCES_JSON}")
 (( ${#ERRORED[@]} == 0 )) || for e in "${ERRORED[@]}"; do bad "instance ${e} is in Error state"; done
 
-# --- Storage -------------------------------------------------------------------------
+# --- Resources -----------------------------------------------------------------------
 
-section "Storage pool '${STORAGE_POOL}'"
+section 'Resource check (headroom per member)'
+GIB=1073741824
+
+# bar PCT: a 30-wide bar plus the percentage, green < 70 <= yellow < 85 <= red.
+# Values over 100 (overcommitted RAM, load above the thread count) fill the bar.
+bar() {
+  local pct="$1" width=30 fill i out='' color="${GREEN}"
+  (( pct >= 70 )) && color="${YELLOW}"
+  (( pct >= 85 )) && color="${RED}"
+  fill=$(( pct > 100 ? width : pct * width / 100 ))
+  for (( i = 0; i < width; i++ )); do (( i < fill )) && out+='█' || out+='░'; done
+  printf '%s%s%s %3d%%' "${color}" "${out}" "${RESET}" "${pct}"
+}
+# row LEVEL LABEL PCT DETAIL: one status line with a bar (LEVEL is ok/warn/bad).
+row() { "$1" "$(printf '%-14s' "$2") $(bar "$3")  $4"; }
+gib() { awk -v b="$1" 'BEGIN { v = b / 1073741824; printf (v >= 100 ? "%.0f" : "%.1f"), v }'; }
+
 for m in "${MEMBERS[@]}"; do
   target=''; [[ "${CLUSTERED}" == 'true' ]] && target="?target=${m}"
+  printf '  %s%s%s (%s)\n' "${BOLD}" "${m}" "${RESET}" "${HOSTNAME_OF[${m}]:-?}"
+
+  # Live figures from the host itself: threads, load, memory, ZFS ARC.
+  # MemAvailable doesn't count the ARC as reclaimable, but everything above
+  # the ARC's minimum size is given back under memory pressure.
+  stats="$(on_member "${m}" 'nproc; cut -d" " -f1-3 /proc/loadavg
+    awk "/^MemTotal:/ {t=\$2} /^MemAvailable:/ {a=\$2} END {print t*1024, a*1024}" /proc/meminfo
+    awk "\$1==\"size\" {s=\$3} \$1==\"c_min\" {c=\$3} END {print s+0, c+0}" /proc/spl/kstat/zfs/arcstats 2>/dev/null || echo "0 0"' 2>/dev/null)" || stats=''
+  if [[ -n "${stats}" ]]; then
+    { read -r threads; read -r load1 load5 load15; read -r mem_total mem_avail; read -r arc arc_min; } <<< "${stats}"
+    arc_free=$(( arc > arc_min ? arc - arc_min : 0 ))
+    mem_used=$(( mem_total - mem_avail - arc_free ))
+    (( mem_used < 0 )) && mem_used=0
+  else
+    # No ssh: fall back to the Incus API (counts the ARC as used, no load).
+    read -r mem_total mem_used threads < <(incus query "/1.0/resources${target}" 2>/dev/null | jq -r '"\(.memory.total) \(.memory.used) \(.cpu.total)"')
+    load5=''; arc_free=0
+  fi
+
+  # Disk: the storage pool.
   read -r used total < <(incus query "/1.0/storage-pools/${STORAGE_POOL}/resources${target}" 2>/dev/null | jq -r '"\(.space.used) \(.space.total)"')
-  if [[ -z "${total:-}" || "${total}" == 'null' || "${total}" == '0' ]]; then warn "${m}: can't read pool usage"; continue; fi
-  pct=$(( used * 100 / total ))
-  line="${m}: ${pct}% used ($(( used / 1073741824 )) of $(( total / 1073741824 )) GiB)"
-  if (( pct >= 90 )); then bad "${line}"; elif (( pct >= 80 )); then warn "${line}"; else ok "${line}"; fi
+  if [[ -z "${total:-}" || "${total}" == 'null' || "${total}" == '0' ]]; then
+    warn "${STORAGE_POOL}: can't read pool usage"
+  else
+    pct=$(( used * 100 / total )); lvl=ok; (( pct >= 80 )) && lvl=warn; (( pct >= 90 )) && lvl=bad
+    row "${lvl}" "${STORAGE_POOL} used" "${pct}" "$(gib "${used}") of $(gib "${total}") GiB, $(gib $(( total - used ))) GiB free"
+  fi
+
+  # Allocated RAM and vCPUs: the limits of the instances placed on this member.
+  # limits.memory can be bytes, K/M/G/T(i)B or a % of host RAM; limits.cpu a count or a CPU set.
+  if [[ -n "${mem_total:-}" && "${mem_total}" != 'null' && "${mem_total}" != '0' ]]; then
+    read -r alloc_run alloc_stop n_run n_unlimited vcpus < <(jq -r --arg m "${target:+${m}}" --argjson total "${mem_total}" '
+      def bytes: if . == null then null
+        elif test("%$") then (rtrimstr("%") | tonumber) * $total / 100
+        else (capture("^(?<n>[0-9.]+)\\s*(?<u>[kKMGTPE]?)(?<i>i?)B?$") // null) as $c
+          | if $c == null then null
+            else ($c.n | tonumber) * pow(if $c.i == "i" then 1024 else 1000 end; {"":0,"k":1,"K":1,"M":2,"G":3,"T":4,"P":5,"E":6}[$c.u])
+            end
+        end;
+      def cpus: if . == null then 0
+        elif test("^[0-9]+$") then tonumber
+        else [split(",")[] | if test("-") then (split("-") | map(tonumber) | .[1] - .[0] + 1) else 1 end] | add
+        end;
+      [.[] | select($m == "" or .location == $m)
+        | {running: (.status == "Running"), mem: (.expanded_config["limits.memory"] | bytes), cpu: (.expanded_config["limits.cpu"] | cpus)}] as $i
+      | [($i | map(select(.running) | .mem // 0) | add // 0 | floor),
+         ($i | map(select(.running | not) | .mem // 0) | add // 0 | floor),
+         ($i | map(select(.running)) | length),
+         ($i | map(select(.running and .mem == null)) | length),
+         ($i | map(select(.running) | .cpu) | add // 0)] | @tsv' <<< "${INSTANCES_JSON}")
+    pct=$(( alloc_run * 100 / mem_total )); lvl=ok; (( pct >= 90 )) && lvl=warn
+    detail="$(gib "${alloc_run}") of $(gib "${mem_total}") GiB to ${n_run} running"
+    if (( alloc_run <= mem_total )); then detail+=", $(gib $(( mem_total - alloc_run ))) GiB unallocated"
+    else detail+=", overcommitted by $(gib $(( alloc_run - mem_total ))) GiB"; fi
+    (( alloc_stop > 0 )) && detail+=" (+$(gib "${alloc_stop}") GiB stopped)"
+    (( n_unlimited > 0 )) && detail+=", ${n_unlimited} without a memory limit"
+    row "${lvl}" 'RAM allocated' "${pct}" "${detail}"
+
+    pct=$(( mem_used * 100 / mem_total )); lvl=ok; (( pct >= 85 )) && lvl=warn; (( pct >= 95 )) && lvl=bad
+    detail="$(gib "${mem_used}") of $(gib "${mem_total}") GiB, $(gib $(( mem_total - mem_used ))) GiB available"
+    (( arc_free > GIB / 10 )) && detail+=" (counts $(gib "${arc_free}") GiB of reclaimable ZFS ARC as free)"
+    [[ -z "${stats}" ]] && detail+=' (from the Incus API; includes ZFS ARC)'
+    row "${lvl}" 'RAM in use' "${pct}" "${detail}"
+  else
+    warn "can't read memory"
+  fi
+
+  # CPU: 5-minute load average against the thread count.
+  if [[ -n "${load5:-}" && -n "${threads:-}" && "${threads}" != '0' ]]; then
+    pct="$(awk -v l="${load5}" -v t="${threads}" 'BEGIN { printf "%d", l * 100 / t + 0.5 }')"
+    lvl=ok; (( pct >= 80 )) && lvl=warn; (( pct >= 100 )) && lvl=bad
+    row "${lvl}" 'CPU load (5m)' "${pct}" "${load5} on ${threads} threads (1m ${load1}, 15m ${load15}); ${vcpus:-0} vCPUs allocated to running instances"
+  else
+    warn "CPU load: can't reach ${m} over ssh"
+  fi
 done
 
 # --- Backups -------------------------------------------------------------------------
