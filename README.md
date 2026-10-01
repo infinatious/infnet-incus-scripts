@@ -235,7 +235,7 @@ sudo ovn-appctl -t /var/run/ovn/ovnsb_db.ctl cluster/status OVN_Southbound
 - **What a host failure takes down:** with three members, only the instances on the failed host. The other members' instances, networking (including gateways, which OVN moves to a surviving host), 1:1 NAT and the API keep working.
 - **No new public IPs while a member is down:** Incus refuses to create or delete network forwards unless every member is online (`peer node ... is down`), so `create-instance.sh --public-ip` fails cleanly (it removes the half-made instance) until the host is back. Instances without a public IP can still be created. If a host is gone for good, `incus cluster remove --force <member>` lifts this.
 - **Storage stays per-host ZFS:** each instance lives on one member; `incus move <instance> --target <member>` copies it (no live migration), and an instance goes down with its host. Shared storage (Ceph) is what buys failover.
-- **Placement:** `create-instance.sh` lets Incus pick the member (the least loaded).
+- **Placement:** `create-instance.sh` lets Incus pick the member (the least loaded) unless `--target <member>` is given.
 - **Backups:** on a cluster, `backup-instances.sh` only backs up the instances on the member it runs on, so the timer installed on every member covers them all (or run one `--all-members` job instead).
 
 Tested end to end on three lab VMs:
@@ -441,7 +441,7 @@ sudo ./branding/uefi-logo.sh revert   # back to the stock firmware
 `deploy-project.sh --all-projects --add-missing-profiles` (or `--update-payloads`) runs the profile action on every project these scripts manage, i.e. those described `Project ID: N`.
 
 - `deploy-project.sh` creates a project, its OVN network, and Linux/Windows/Docker profiles.
-- `create-instance.sh` creates an instance from the chosen profile and image, and maps a public IP to it with 1:1 NAT.
+- `create-instance.sh` creates an instance from the chosen profile and image, and maps a public IP to it with 1:1 NAT. `--empty` makes a stopped VM with no image (NIC, ACL, NAT and DNS all set) to receive an imported disk; `--target` picks the member.
 - `resize-instance.sh` changes CPU, RAM and root disk size.
 - `delete-instance.sh` deletes an instance and releases its public IP and DNS record.
 - `delete-project.sh` deletes a project's profiles, network and the project itself (and optionally its instances).

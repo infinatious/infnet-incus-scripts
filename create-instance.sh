@@ -13,7 +13,7 @@ fail() {
 
 usage() {
   cat <<'EOF'
-Usage: create-instance.sh --project-id ID --environment ENV --service-code CODE --profile-type TYPE [--cpu N] [--ram GIB] [--disk GIB] [--image-index N] [--image-alias NAME] [--public-ip IP|random | --no-public-ip] [--description-suffix TEXT]
+Usage: create-instance.sh --project-id ID --environment ENV --service-code CODE --profile-type TYPE [--cpu N] [--ram GIB] [--disk GIB] [--image-index N] [--image-alias NAME] [--public-ip IP|random | --no-public-ip] [--description-suffix TEXT] [--empty] [--target MEMBER]
 
 Options:
   --project-id ID          Numeric project ID to select the project.
@@ -35,11 +35,18 @@ Options:
                            public IP when not run from a terminal.
   --description-suffix TEXT
                            Optional suffix appended to the generated description.
+  --empty                  Create an empty VM (no image) and leave it stopped,
+                           with its NIC, firewall ACL, 1:1 NAT and DNS set up as
+                           usual: the target for an imported disk (e.g. from
+                           Proxmox, see README "Importing a VM disk").
+  --target MEMBER          Cluster member to create the instance on (default:
+                           Incus picks one).
   --help                   Show this help message.
 
 Examples:
   ./create-instance.sh --project-id 42 --environment p --service-code demo1 --profile-type linux --cpu 2 --ram 4 --disk 20 --image-index 3
   ./create-instance.sh --project-id 42 --environment d --service-code svc01 --profile-type win --image-alias ubuntu --description-suffix 'site-a'
+  ./create-instance.sh --project-id 24 --environment p --service-code rdsts --profile-type win --cpu 4 --ram 8 --disk 100 --public-ip random --empty --target us-west-b
 EOF
 }
 
@@ -83,6 +90,8 @@ IMAGE_ALIAS_ARG=''
 PUBLIC_IP_ARG=''
 NO_PUBLIC_IP_ARG=''
 DESCRIPTION_SUFFIX_ARG=''
+EMPTY_ARG=''
+TARGET_ARG=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project-id)
@@ -142,6 +151,15 @@ while [[ $# -gt 0 ]]; do
     --description-suffix)
       [[ $# -ge 2 ]] || fail 'missing value for --description-suffix.'
       DESCRIPTION_SUFFIX_ARG="$2"
+      shift 2
+      ;;
+    --empty)
+      EMPTY_ARG='yes'
+      shift
+      ;;
+    --target)
+      [[ $# -ge 2 ]] || fail 'missing value for --target.'
+      TARGET_ARG="$2"
       shift 2
       ;;
     --help|-h)
@@ -357,45 +375,52 @@ esac
 
 PROJECT_ID_STR="${PROJECT_ID}"
 
-# Docker relies on security.nesting, which only applies to containers.
-case "${PROFILE_TYPE}" in
-  linux|Linux|l) IMAGE_FILTER='((.aliases | map(.name // "") | join(" ")) | test("win"; "i")) | not' ;;
-  win|Windows|w) IMAGE_FILTER='(.aliases | map(.name // "") | join(" ")) | test("win"; "i")' ;;
-  docker|Docker|d) IMAGE_FILTER='.type == "container" and (((.aliases | map(.name // "") | join(" ")) | test("win"; "i")) | not)' ;;
-esac
-mapfile -t IMAGE_ROWS < <(incus image list --project default --format json | jq -r ".[] | select(${IMAGE_FILTER}) | [(.aliases[0].name // \"-\"), .fingerprint[0:12], .type, .architecture, (.description // \"\")] | @tsv")
-(( ${#IMAGE_ROWS[@]} > 0 )) || fail "no matching images found for profile '${PROFILE_NAME}'."
+if [[ -n "${EMPTY_ARG}" ]]; then
+  # An empty VM gets its disk written later, so there's no image to pick.
+  [[ "${PROFILE_TYPE}" =~ ^(docker|Docker|d)$ ]] && fail '--empty creates a VM; use --profile-type win or linux.'
+  [[ -z "${IMAGE_INDEX_ARG}${IMAGE_ALIAS_ARG}" ]] || fail '--empty takes no image.'
+  SELECTED_TYPE='virtual-machine'; SELECTED_ALIAS='(empty)'; SELECTED_FP12='-'; SELECTED_FP_FULL=''
+else
+  # Docker relies on security.nesting, which only applies to containers.
+  case "${PROFILE_TYPE}" in
+    linux|Linux|l) IMAGE_FILTER='((.aliases | map(.name // "") | join(" ")) | test("win"; "i")) | not' ;;
+    win|Windows|w) IMAGE_FILTER='(.aliases | map(.name // "") | join(" ")) | test("win"; "i")' ;;
+    docker|Docker|d) IMAGE_FILTER='.type == "container" and (((.aliases | map(.name // "") | join(" ")) | test("win"; "i")) | not)' ;;
+  esac
+  mapfile -t IMAGE_ROWS < <(incus image list --project default --format json | jq -r ".[] | select(${IMAGE_FILTER}) | [(.aliases[0].name // \"-\"), .fingerprint[0:12], .type, .architecture, (.description // \"\")] | @tsv")
+  (( ${#IMAGE_ROWS[@]} > 0 )) || fail "no matching images found for profile '${PROFILE_NAME}'."
 
-echo 'Available images:'
-for i in "${!IMAGE_ROWS[@]}"; do
-  IFS=$'\t' read -r alias shortfp imgtype arch desc <<< "${IMAGE_ROWS[$i]}"
-  printf '%2d) alias=%s  fp=%s  type=%s  arch=%s  desc=%s\n' "$((i + 1))" "$alias" "$shortfp" "$imgtype" "$arch" "$desc"
-done
-
-if [[ -n "${IMAGE_INDEX_ARG}" ]]; then
-  IMAGE_INDEX="${IMAGE_INDEX_ARG}"
-elif [[ -n "${IMAGE_ALIAS_ARG}" ]]; then
-  IMAGE_MATCH=''
+  echo 'Available images:'
   for i in "${!IMAGE_ROWS[@]}"; do
     IFS=$'\t' read -r alias shortfp imgtype arch desc <<< "${IMAGE_ROWS[$i]}"
-    if [[ "${alias}" == "${IMAGE_ALIAS_ARG}" ]]; then
-      IMAGE_MATCH="$((i + 1))"
-      break
-    fi
+    printf '%2d) alias=%s  fp=%s  type=%s  arch=%s  desc=%s\n' "$((i + 1))" "$alias" "$shortfp" "$imgtype" "$arch" "$desc"
   done
-  [[ -n "${IMAGE_MATCH}" ]] || fail "image alias '${IMAGE_ALIAS_ARG}' was not found in the filtered list."
-  IMAGE_INDEX="${IMAGE_MATCH}"
-else
-  read -r -p 'Choose image number: ' IMAGE_INDEX
+
+  if [[ -n "${IMAGE_INDEX_ARG}" ]]; then
+    IMAGE_INDEX="${IMAGE_INDEX_ARG}"
+  elif [[ -n "${IMAGE_ALIAS_ARG}" ]]; then
+    IMAGE_MATCH=''
+    for i in "${!IMAGE_ROWS[@]}"; do
+      IFS=$'\t' read -r alias shortfp imgtype arch desc <<< "${IMAGE_ROWS[$i]}"
+      if [[ "${alias}" == "${IMAGE_ALIAS_ARG}" ]]; then
+        IMAGE_MATCH="$((i + 1))"
+        break
+      fi
+    done
+    [[ -n "${IMAGE_MATCH}" ]] || fail "image alias '${IMAGE_ALIAS_ARG}' was not found in the filtered list."
+    IMAGE_INDEX="${IMAGE_MATCH}"
+  else
+    read -r -p 'Choose image number: ' IMAGE_INDEX
+  fi
+  [[ "${IMAGE_INDEX}" =~ ^[0-9]+$ ]] || fail 'image selection must be numeric.'
+  (( IMAGE_INDEX >= 1 && IMAGE_INDEX <= ${#IMAGE_ROWS[@]} )) || fail 'image selection is out of range.'
+  SELECTED_ROW="${IMAGE_ROWS[$((IMAGE_INDEX - 1))]}"
+  SELECTED_ALIAS="$(awk -F '\t' '{print $1}' <<< "${SELECTED_ROW}")"
+  SELECTED_FP12="$(awk -F '\t' '{print $2}' <<< "${SELECTED_ROW}")"
+  SELECTED_TYPE="$(awk -F '\t' '{print $3}' <<< "${SELECTED_ROW}")"
+  SELECTED_FP_FULL="$(incus image list --project default --format json | jq -r --arg fp "${SELECTED_FP12}" '.[] | select(.fingerprint | startswith($fp)) | .fingerprint' | head -n1)"
+  [[ -n "${SELECTED_FP_FULL}" ]] || fail 'unable to resolve selected image fingerprint.'
 fi
-[[ "${IMAGE_INDEX}" =~ ^[0-9]+$ ]] || fail 'image selection must be numeric.'
-(( IMAGE_INDEX >= 1 && IMAGE_INDEX <= ${#IMAGE_ROWS[@]} )) || fail 'image selection is out of range.'
-SELECTED_ROW="${IMAGE_ROWS[$((IMAGE_INDEX - 1))]}"
-SELECTED_ALIAS="$(awk -F '\t' '{print $1}' <<< "${SELECTED_ROW}")"
-SELECTED_FP12="$(awk -F '\t' '{print $2}' <<< "${SELECTED_ROW}")"
-SELECTED_TYPE="$(awk -F '\t' '{print $3}' <<< "${SELECTED_ROW}")"
-SELECTED_FP_FULL="$(incus image list --project default --format json | jq -r --arg fp "${SELECTED_FP12}" '.[] | select(.fingerprint | startswith($fp)) | .fingerprint' | head -n1)"
-[[ -n "${SELECTED_FP_FULL}" ]] || fail 'unable to resolve selected image fingerprint.'
 
 case "${SELECTED_TYPE}" in
   virtual-machine) INSTANCE_TYPE='vs' ;;
@@ -413,20 +438,29 @@ fi
 (( NEXT_SEQ <= 99 )) || fail 'next sequence would exceed 99.'
 INSTANCE_NAME="$(printf '%s%02d' "${NAME_PREFIX}" "${NEXT_SEQ}")"
 
-INIT_ARGS=(init --project "${PROJECT_NAME}" --profile "${PROFILE_NAME}" "${SELECTED_FP_FULL}" "${INSTANCE_NAME}" -c limits.cpu="${CPU_CORES}" -c limits.memory="${RAM_GIB}GiB")
+if [[ -n "${EMPTY_ARG}" ]]; then
+  INIT_ARGS=(init --empty --project "${PROJECT_NAME}" --profile "${PROFILE_NAME}" "${INSTANCE_NAME}" -c limits.cpu="${CPU_CORES}" -c limits.memory="${RAM_GIB}GiB")
+else
+  INIT_ARGS=(init --project "${PROJECT_NAME}" --profile "${PROFILE_NAME}" "${SELECTED_FP_FULL}" "${INSTANCE_NAME}" -c limits.cpu="${CPU_CORES}" -c limits.memory="${RAM_GIB}GiB")
+fi
 if [[ "${SELECTED_TYPE}" == 'virtual-machine' ]]; then
   INIT_ARGS+=(--vm)
 fi
 INIT_ARGS+=(-d root,size="${DISK_GIB}GiB")
+[[ -z "${TARGET_ARG}" ]] || INIT_ARGS+=(--target "${TARGET_ARG}")
 
-echo "Creating instance '${INSTANCE_NAME}' from image ${SELECTED_ALIAS} (${SELECTED_FP12})..."
+if [[ -n "${EMPTY_ARG}" ]]; then
+  echo "Creating empty VM '${INSTANCE_NAME}'${TARGET_ARG:+ on ${TARGET_ARG}}..."
+else
+  echo "Creating instance '${INSTANCE_NAME}' from image ${SELECTED_ALIAS} (${SELECTED_FP12})${TARGET_ARG:+ on ${TARGET_ARG}}..."
+fi
 # incus create/launch commands read YAML from stdin when it isn't a terminal,
 # so they get </dev/null to never block on (or swallow) a pipe or ssh channel.
 run incus "${INIT_ARGS[@]}" </dev/null
 
 # Images that can't load the incus-agent over virtiofs/9p (e.g. Windows) are
 # marked requirements.cdrom_agent and won't start without the agent drive.
-NEEDS_AGENT_DRIVE="$(incus image show "${SELECTED_FP_FULL}" --project default 2>/dev/null \
+NEEDS_AGENT_DRIVE="$([[ -n "${SELECTED_FP_FULL}" ]] && incus image show "${SELECTED_FP_FULL}" --project default 2>/dev/null \
   | python3 -c 'import sys, yaml; print((yaml.safe_load(sys.stdin) or {}).get("properties", {}).get("requirements.cdrom_agent", ""))')"
 if [[ "${SELECTED_TYPE}" == 'virtual-machine' && "${NEEDS_AGENT_DRIVE}" == 'true' ]]; then
   echo 'Image requires the incus-agent drive; adding it...'
@@ -462,7 +496,9 @@ else
     || { remove_new_instance; fail "unable to attach firewall ACL '${INSTANCE_NAME}' to ${PUBLIC_IP_NIC}; the instance was removed."; }
 fi
 
-if ! incus start "${INSTANCE_NAME}" --project "${PROJECT_NAME}"; then
+if [[ -n "${EMPTY_ARG}" ]]; then
+  echo "Leaving '${INSTANCE_NAME}' stopped: write its disk, then start it."
+elif ! incus start "${INSTANCE_NAME}" --project "${PROJECT_NAME}"; then
   # It never ran, so remove it (with its forward and ACL) rather than leave an
   # orphan that also bumps the next instance's sequence number.
   remove_new_instance
@@ -479,10 +515,10 @@ fi
 # handed out. The guest-reported address needs the incus-agent; VMs without
 # it (e.g. a fresh Windows install) never report one, so fall back to the
 # address OVN assigned to the NIC's port, matched by MAC.
-[[ -n "${INSTANCE_IPV4}" ]] || echo 'Waiting for IPv4 address...'
+[[ -n "${INSTANCE_IPV4}" || -n "${EMPTY_ARG}" ]] || echo 'Waiting for IPv4 address...'
 INSTANCE_HWADDR="$(incus config get "${INSTANCE_NAME}" "volatile.${PUBLIC_IP_NIC}.hwaddr" --project "${PROJECT_NAME}" 2>/dev/null || true)"
 for _ in $(seq 1 60); do
-  [[ -n "${INSTANCE_IPV4}" ]] && break
+  [[ -n "${INSTANCE_IPV4}" || -n "${EMPTY_ARG}" ]] && break
   INSTANCE_IPV4="$(incus query "/1.0/instances/${INSTANCE_NAME}/state?project=${PROJECT_NAME}" 2>/dev/null \
     | jq -r --arg nic "${PUBLIC_IP_NIC}" '.network[$nic].addresses[]? | select(.family=="inet" and .scope=="global") | .address' | head -n1)"
   if [[ -z "${INSTANCE_IPV4}" && -n "${INSTANCE_HWADDR}" ]]; then
@@ -532,7 +568,8 @@ echo 'Instance creation complete.'
 echo "Name        : ${INSTANCE_NAME}"
 echo "Project     : ${PROJECT_NAME}"
 echo "Profile     : ${PROFILE_NAME}"
-echo "Image       : ${SELECTED_ALIAS} (${SELECTED_FP12})"
+echo "Image       : ${SELECTED_ALIAS}${SELECTED_FP_FULL:+ (${SELECTED_FP12})}${EMPTY_ARG:+, not started}"
+echo "Location    : $(incus list "${INSTANCE_NAME}" --project "${PROJECT_NAME}" -f csv -c L 2>/dev/null)"
 echo "Type        : ${INSTANCE_TYPE}"
 echo "Subnet      : ${NETWORK_IPV4_CIDR}"
 echo "Project ID  : ${PROJECT_ID}"
