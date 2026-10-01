@@ -47,6 +47,8 @@ source "${SCRIPT_DIR}/lib/public-ip.sh"
 [[ -f "${SCRIPT_DIR}/lib/firewall.sh" ]] || fail "${SCRIPT_DIR}/lib/firewall.sh not found."
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/firewall.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/zabbix.sh"
 
 PROJECT_ID_ARG=''
 DELETE_INSTANCES_ARG=''
@@ -129,6 +131,7 @@ if [[ -n "${INSTANCE_LIST}" ]]; then
         run nat_release "${PROJECT_NAME}" "${NETWORK_NAME}" "${PUBLIC_IP}"
       fi
       dns_deregister_instance "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PUBLIC_IP}" || true
+      zabbix_deregister_instance "${INSTANCE_NAME}" || true
       run fw_delete_acl "${INSTANCE_NAME}" "${PROJECT_NAME}"
     done < <(printf '%s\n' "${INSTANCE_LIST}" | sed '/^$/d')
   else

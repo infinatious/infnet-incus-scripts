@@ -318,7 +318,7 @@ echo
 echo "The instance was imported stopped. Start it with:"
 echo "  incus start ${TARGET_NAME} --project ${PROJECT_NAME}"
 if [[ -n "${NAT_PUBLIC}" ]]; then
-  echo "Its 1:1 NAT (${NAT_PUBLIC}) is in place. DNS records were not touched; run dns/sync-dns-records.sh if needed."
+  echo "Its 1:1 NAT (${NAT_PUBLIC}) is in place. DNS records and Zabbix were not touched; run dns/sync-dns-records.sh and monitoring/sync-zabbix-hosts.sh if needed."
 fi
 if (( ${#ACLS_CREATED[@]} > 0 )); then
   echo "Recreated firewall ACL(s) ${ACLS_CREATED[*]} with only the default inbound rules; re-add any other ports the original allowed."

@@ -52,6 +52,8 @@ source "${SCRIPT_DIR}/lib/public-ip.sh"
 [[ -f "${SCRIPT_DIR}/lib/firewall.sh" ]] || fail "${SCRIPT_DIR}/lib/firewall.sh not found."
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/firewall.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/zabbix.sh"
 
 PROJECT_ID_ARG=''
 INSTANCE_INDEX_ARG=''
@@ -184,6 +186,7 @@ else
   echo "No public IP found on instance '${INSTANCE_NAME}', skipping 1:1 NAT cleanup."
 fi
 dns_deregister_instance "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PUBLIC_IP}" || true
+zabbix_deregister_instance "${INSTANCE_NAME}" || true
 
 echo "Deleting firewall ACL '${INSTANCE_NAME}' (if any)..."
 run fw_delete_acl "${INSTANCE_NAME}" "${PROJECT_NAME}"

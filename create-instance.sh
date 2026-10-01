@@ -75,6 +75,8 @@ source "${NAT_LIB_FILE}"
 [[ -f "${SCRIPT_DIR}/lib/firewall.sh" ]] || fail "${SCRIPT_DIR}/lib/firewall.sh not found."
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/firewall.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/zabbix.sh"
 
 ARGS_PROVIDED=$#
 
@@ -536,6 +538,12 @@ if [[ "${INSTANCE_IPV4}" != 'unknown' ]]; then
 else
   echo "Internal address unknown, so '${DNS_INTERNAL_FQDN}' isn't registered yet; dns/sync-dns-records.sh adds it later."
 fi
+
+# Monitoring: register the host in Zabbix. Imported VMs (--empty) carry their
+# own OS, so they get no agent template; link one by hand if they run an agent.
+INSTANCE_FAMILY="${PROFILE_FAMILY}"
+zabbix_register_instance "${INSTANCE_NAME}" "${PROJECT_NAME}" "${INSTANCE_FAMILY}" "${PUBLIC_IPV4}" \
+  "$([[ "${INSTANCE_IPV4}" != 'unknown' ]] && echo "${INSTANCE_IPV4}")" "$([[ -n "${EMPTY_ARG}" ]] && echo no || echo auto)" || true
 
 if [[ -n "${DESCRIPTION_SUFFIX_ARG}" ]]; then
   DESCRIPTION_SUFFIX="${DESCRIPTION_SUFFIX_ARG}"

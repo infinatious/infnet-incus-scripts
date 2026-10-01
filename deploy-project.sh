@@ -107,13 +107,34 @@ name: ${name}
 PROFILE
 }
 
+# The final runcmd step that installs the Zabbix agent (active mode) when
+# ZABBIX_SERVER_ACTIVE is set in .env; empty otherwise. The script comes from
+# the repo on GitHub, like post-install.sh.
+zabbix_agent_runcmd() {
+  [[ -n "${ZABBIX_SERVER_ACTIVE:-}" ]] || return 0
+  printf "sh -c 'curl -fsSL https://raw.githubusercontent.com/infinatious/infnet-incus-scripts/refs/heads/main/monitoring/zabbix-agent-install.sh | bash -s -- \"%s\" \"infnet;%s\" || true'\n" \
+    "${ZABBIX_SERVER_ACTIVE}" "${PROJECT_NAME}"
+}
+
+# The Linux payload: cloud-init-user-data.yaml as is, plus the Zabbix agent
+# step when monitoring is configured.
+linux_user_data() {
+  local agent
+  agent="$(zabbix_agent_runcmd)"
+  if [[ -z "${agent}" ]]; then
+    cat "${CLOUD_INIT_FILE}"
+  else
+    printf '%s\n  - %s\n' "$(cat "${CLOUD_INIT_FILE}")" "${agent}"
+  fi
+}
+
 # The Linux payload with Docker added, so users and keys stay defined in one
 # file. Docker Engine and the Compose plugin come from Docker's own repos:
 # get.docker.com sets them up on Debian, Ubuntu and Fedora but refuses
 # AlmaLinux and Rocky, which get Docker's RHEL repo directly (checked first,
 # since their ID_LIKE also contains "fedora").
 docker_user_data() {
-  python3 - "${CLOUD_INIT_FILE}" <<'PY'
+  python3 - <(linux_user_data) <<'PY'
 import sys
 import yaml
 with open(sys.argv[1]) as f:
@@ -146,7 +167,7 @@ create_standard_profiles() {
     echo "Linux profile '${name}' already exists, leaving it."
   else
     echo "Creating Linux profile '${name}' in project '${PROJECT_NAME}'..."
-    write_profile "${name}" $'  limits.cpu: "1"\n  limits.memory: 2GiB' "$(cat "${CLOUD_INIT_FILE}")" 20GiB
+    write_profile "${name}" $'  limits.cpu: "1"\n  limits.memory: 2GiB' "$(linux_user_data)" 20GiB
   fi
 
   name="${PROJECT_NAME}-win"
@@ -179,7 +200,7 @@ update_profile_payloads() {
       continue
     fi
     case "${name}" in
-      *-linux) user_data="$(cat "${CLOUD_INIT_FILE}")" ;;
+      *-linux) user_data="$(linux_user_data)" ;;
       *-win) user_data="$(cat "${CLOUDBASE_INIT_FILE}")" ;;
       *-linux-docker) user_data="$(docker_user_data)" || fail "unable to build the Docker cloud-init payload." ;;
     esac

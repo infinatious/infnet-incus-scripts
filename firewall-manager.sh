@@ -43,6 +43,14 @@ fail() {
 }
 
 INFNET_CIDR='10.100.0.0/16'
+# Zabbix port checks follow the ACL (lib/zabbix.sh); optional.
+if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+  # shellcheck source=/dev/null
+  source "${SCRIPT_DIR}/.env"
+  # shellcheck source=/dev/null
+  source "${SCRIPT_DIR}/lib/zabbix.sh"
+fi
+sync_monitoring() { declare -F zabbix_sync_ports >/dev/null && zabbix_configured && { zabbix_sync_ports "${INSTANCE}" "${PROJECT_NAME}" || true; }; }
 PROJECT_ID_ARG=''
 INSTANCE_ARG=''
 ACTION=''
@@ -147,6 +155,7 @@ add_rules() {
       + (if $source != "" then {source: $source} else {} end)]')"
   put_ingress "${new}" || fail 'Incus rejected the rule (check the ports and source).'
   echo "Added: allow ${protocols// /+}${ports:+ ${ports}} from ${source:-anywhere} (${description})."
+  sync_monitoring
 }
 
 remove_rule() {
@@ -157,6 +166,7 @@ remove_rule() {
   new="$(incus query "${ACL_PATH}" | jq -c --argjson i "$(( number - 1 ))" '.ingress | del(.[$i])')"
   put_ingress "${new}" || fail 'Incus rejected the change.'
   echo "Removed rule ${number}: $(jq -r '"\(.protocol // "any") \(.destination_port // "") from \(.source // "anywhere") (\(.description // ""))"' <<< "${rule}")."
+  sync_monitoring
 }
 
 # Removing the SSH/RDP rule can cut off remote access; ask first in the menu.
