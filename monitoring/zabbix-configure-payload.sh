@@ -9,7 +9,11 @@
 #     token "infnet-incus-scripts" for the repo's scripts. A new token is only
 #     generated when none exists; it is stored root-only in
 #     /root/zabbix/api-token, where zabbix-configure.sh reads it.
-# Environment: DISCORD_WEBHOOK (optional; Discord is left alone without it).
+#   - Frontend URL (Administration > General > Other) and the global macro
+#     {$ZABBIX.URL}: webhook media types like Discord link back to the problem
+#     with it and fail without it.
+# Environment: DISCORD_WEBHOOK (optional; Discord is left alone without it),
+# FRONTEND_URL (e.g. https://pd25-zabbx-ct01.infnet/).
 set -euo pipefail
 
 URL='https://127.0.0.1/api_jsonrpc.php'
@@ -24,11 +28,34 @@ api() {
   jq -c '.result' <<< "${response}"
 }
 
-AUTH=''
-AUTH="$(api user.login "$(jq -nc --arg p "$(cat /root/zabbix/admin-password)" '{username: "Admin", password: $p}')" | jq -r '.')"
+# Logs in again before each section: some changes (e.g. to Admin's own
+# media) end the current session, and the next call then fails.
+login() {
+  AUTH=''
+  AUTH="$(api user.login "$(jq -nc --arg p "$(cat /root/zabbix/admin-password)" '{username: "Admin", password: $p}')" | jq -r '.')"
+}
+
+# --- Frontend URL ---
+login
+if [[ -n "${FRONTEND_URL:-}" ]]; then
+  api settings.update "$(jq -nc --arg u "${FRONTEND_URL}" '{url: $u}')" >/dev/null
+  # The webhook media types (Discord, Mattermost, ...) read it from the global
+  # macro {$ZABBIX.URL}, not from the setting.
+  MACRO_ID="$(api usermacro.get '{"globalmacro":true,"filter":{"macro":"{$ZABBIX.URL}"},"output":["globalmacroid"]}' | jq -r '.[0].globalmacroid // empty')"
+  if [[ -n "${MACRO_ID}" ]]; then
+    api usermacro.updateglobal "$(jq -nc --arg id "${MACRO_ID}" --arg u "${FRONTEND_URL}" '{globalmacroid: $id, value: $u}')" >/dev/null
+  else
+    api usermacro.createglobal "$(jq -nc --arg u "${FRONTEND_URL}" '{macro: "{$ZABBIX.URL}", value: $u, description: "Frontend URL for webhook media types"}')" >/dev/null
+  fi
+  echo "Frontend URL (and {\$ZABBIX.URL}) set to ${FRONTEND_URL}."
+fi
 
 # --- Discord ---
+login
 if [[ -n "${DISCORD_WEBHOOK:-}" ]]; then
+  # Zabbix's Discord script calls /api/v10/..., which the legacy
+  # discordapp.com host rejects ("Invalid API version"); discord.com accepts it.
+  DISCORD_WEBHOOK="${DISCORD_WEBHOOK/\/\/discordapp.com\//\/\/discord.com\/}"
   MT="$(api mediatype.get '{"filter":{"name":["Discord"]},"output":["mediatypeid","status"]}' | jq -r '.[0].mediatypeid')"
   api mediatype.update "$(jq -nc --arg id "${MT}" '{mediatypeid: $id, status: 0}')" >/dev/null
   ADMIN_ID="$(api user.get '{"filter":{"username":["Admin"]},"output":["userid"]}' | jq -r '.[0].userid')"
@@ -42,11 +69,13 @@ if [[ -n "${DISCORD_WEBHOOK:-}" ]]; then
 fi
 
 # --- Host group for instances ---
+login
 api hostgroup.get '{"filter":{"name":["Incus"]},"output":["groupid"]}' | jq -e 'length > 0' >/dev/null \
   || api hostgroup.create '{"name":"Incus"}' >/dev/null
 echo "Host group 'Incus' present."
 
 # --- API user and token for the scripts ---
+login
 SVC_ID="$(api user.get '{"filter":{"username":["svc-infnet-incus"]},"output":["userid"]}' | jq -r '.[0].userid // empty')"
 if [[ -z "${SVC_ID}" ]]; then
   ROLE="$(api role.get '{"filter":{"name":["Super admin role"]},"output":["roleid"]}' | jq -r '.[0].roleid')"

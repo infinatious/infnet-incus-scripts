@@ -285,7 +285,7 @@ On a physical uplink, OVN answers ARP for the forward addresses itself (`ovn.ing
 
 OVN ACLs are stateful (replies to the instance's own connections get back in), and Incus automatically allows DHCP, DNS and ping to the network's router, so addressing and name resolution keep working. Instances without a public IP get the same ACL.
 
-The ACL only filters traffic that reaches an instance **through the project router**, i.e. from outside its network (public IP, other projects, INFNET). Traffic between instances on the **same** project network isn't blocked by the default inbound reject: senders have egress `allow`, and OVN ACLs are stateful. Verified on us-west 2026-10-01.
+The ACL only filters traffic that reaches an instance **through the project router**, i.e. from outside its network (public IP, other projects, INFNET). Traffic between instances on the **same** project network isn't blocked by the default inbound reject, *as long as the sender has an ACL too*: its egress `allow` and OVN's stateful ACLs let the connection through. Every instance made by these scripts has one. An instance created by hand without an ACL **is** filtered by the destination's ACL (connection refused). Verified on us-west 2026-10-01.
 
 ### Routing a remote subnet through a gateway instance
 
@@ -604,6 +604,58 @@ Audits every instance in every project and creates or corrects its Technitium A 
 The restored instance is imported stopped. If the backup had a public IP, the network forward for it is recreated first (Incus won't import a NIC whose `ipv4.address.external` has no forward) and removed again if the import fails. Because the NAT identity travels with the instance, the restore is refused while another instance still owns that public IP: delete the original first, or restore the copy by hand and give it a new address with `incus config device set <copy> eth0 ipv4.address= ipv4.address.external=`.
 
 ---
+
+## Zabbix monitoring
+
+Zabbix monitors the **instances**, both containers and VMs (not the Incus hosts). Instances are registered automatically, the same way as DNS:
+
+| When | What happens in Zabbix |
+|---|---|
+| `create-instance.sh` | Host `<instance>` in group `Incus/<project>`, tagged `site`, `project`, `env`, `type` and `managed-by: infnet-incus-scripts`.<br>**ICMP Ping**, plus a **TCP check per port** the instance's ACL opens to the Zabbix server (trigger after 3 failures).<br>Linux instances also get **Linux by Zabbix agent active**. Their profile's cloud-init installs `zabbix-agent2`. |
+| `firewall-manager.sh` add/remove | The TCP checks follow the ACL |
+| `delete-instance.sh`, `delete-project.sh --delete-instances` | Host removed |
+| `monitoring/sync-zabbix-hosts.sh` (also `start.sh` → Misc) | Registers or updates every instance of this site, removes managed hosts whose instance is gone (`--no-prune` keeps them) |
+
+- **Server-side checks** (ping, TCP) run from the Zabbix server against the instance's **public IP**. Other projects' internal addresses aren't reachable, so instances without a public IP only get their agent.
+  - Instances in the server's own project (`ZABBIX_PROJECT`) are checked on their internal IP, because of hairpin NAT.
+  - A port only counts if its ACL rule allows anywhere or a range containing `ZABBIX_SERVER_IP`. Single ports only, no ranges.
+  - To monitor an INFNET-only port, also allow it from `ZABBIX_SERVER_IP/32`.
+- **Agents run active-only.** `monitoring/zabbix-agent-install.sh` sets `Server=` (nothing listens) and `ServerActive=<public IP>;<internal IP>`. The agent tries the second address when the first fails, which happens inside the server's own project.
+  - Instances need no inbound rule.
+  - The Zabbix server's ACL allows tcp/10051 from INFNET and both sites' public ranges.
+- **Windows:** imported or Windows VMs get ICMP and port checks only. Install the agent by hand and link a Windows template; the scripts never unlink templates.
+- **Alerts:** problems of severity Warning and up go to Discord, through the built-in Discord media type on the `Admin` user and the default "Report problems to Zabbix administrators" action.
+
+### Setting it up
+
+```bash
+# 1. Server: an Ubuntu 26.04 container in the monitoring project, then Zabbix 7.4 + PostgreSQL + nginx (own TLS, self-signed)
+./create-instance.sh --project-id 25 --environment p --service-code zabbx --profile-type linux --image-alias ubuntu2604 --cpu 4 --ram 8 --disk 100 --public-ip random
+./monitoring/install-zabbix-server.sh --project-id 25 --instance pd25-zabbx-ct01
+./firewall-manager.sh --project-id 25 --instance pd25-zabbx-ct01 --add tcp:443,80 --source infnet --description "Zabbix web (INFNET)"
+./firewall-manager.sh --project-id 25 --instance pd25-zabbx-ct01 --add tcp:10051 --source 10.100.0.0/16,137.152.224.0/21,137.152.232.0/21 --description "Zabbix agents"
+# 2. Discord, API user/token, frontend URL; writes ZABBIX_* into this host's .env (copy them to the other members)
+DISCORD_WEBHOOK='https://discord.com/api/webhooks/…' ./monitoring/zabbix-configure.sh --project-id 25 --instance pd25-zabbx-ct01 --site us-west
+# 3. Agent in new Linux instances, existing instances, Zabbix hosts
+./deploy-project.sh --all-projects --update-payloads
+./monitoring/install-zabbix-agent.sh --project-id 20 --instance pd20-dnsag-ct01   # per existing Linux instance
+./monitoring/sync-zabbix-hosts.sh
+```
+
+| `.env` | Meaning |
+|---|---|
+| `ZABBIX_URL` | `https://<server public IP>` (API; self-signed certificate unless `ZABBIX_CA_FILE` is set) |
+| `ZABBIX_API_TOKEN` | Token of the `svc-infnet-incus` API user |
+| `ZABBIX_SITE` | `us-west` / `us-east`: tags hosts, and sync only ever touches this site's hosts |
+| `ZABBIX_SERVER_IP` | Server public IP, used to decide which ACL ports it can reach |
+| `ZABBIX_SERVER_ACTIVE` | Agents' `ServerActive` (public;internal) |
+| `ZABBIX_PROJECT` | Project the server lives in |
+
+Without `ZABBIX_*` in `.env` everything Zabbix-related is skipped with a warning.
+
+- **Secrets** stay root-only in the server container under `/root/zabbix/`: `admin-password` (web user `Admin`), `db-password`, `api-token`.
+- **Discord gotcha:** Zabbix's Discord script calls `/api/v10/…`, which the legacy `discordapp.com` host rejects ("Invalid API version"). `zabbix-configure.sh` rewrites the webhook to `discord.com`.
+- **Frontend URL gotcha:** webhook media types also need the global macro `{$ZABBIX.URL}` set to the frontend URL. `zabbix-configure.sh` sets it.
 
 ## DNS registration
 

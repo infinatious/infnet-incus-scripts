@@ -76,6 +76,7 @@ MENU_5=(
   'Sync DNS records'                              'dns/sync-dns-records.sh'
   'Sync DNS records (dry run)'                    'dns/sync-dns-records.sh --dry-run'
   'Manage images and aliases'                     'manage-images.sh'
+  'Sync Zabbix hosts'                             'monitoring/sync-zabbix-hosts.sh'
 )
 
 show_header() {

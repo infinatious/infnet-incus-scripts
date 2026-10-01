@@ -13,6 +13,8 @@ usage() { sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; }
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "${SCRIPT_DIR}")"
 ENV_FILE="${REPO_DIR}/.env"
+# shellcheck source=/dev/null
+source "${ENV_FILE}"
 
 PROJECT_ID='' INSTANCE='' SITE=''
 while [[ $# -gt 0 ]]; do
@@ -36,7 +38,8 @@ if [[ -z "${DISCORD_WEBHOOK+x}" && -t 0 ]]; then
 fi
 
 incus file push "${SCRIPT_DIR}/zabbix-configure-payload.sh" "${INSTANCE}/root/zabbix-configure-payload.sh" --project "${PROJECT}" --mode 0700 || fail 'unable to push the payload.'
-incus exec "${INSTANCE}" --project "${PROJECT}" --env DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}" -- bash /root/zabbix-configure-payload.sh || fail 'configuration failed.'
+incus exec "${INSTANCE}" --project "${PROJECT}" --env DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}" \
+  --env FRONTEND_URL="https://${INSTANCE}.${TECHNITIUM_ZONE:-infnet}/" -- bash /root/zabbix-configure-payload.sh || fail 'configuration failed.'
 TOKEN="$(incus exec "${INSTANCE}" --project "${PROJECT}" -- cat /root/zabbix/api-token)" || fail 'unable to read the API token.'
 
 # Replace (or append) the ZABBIX_* settings in .env.
