@@ -73,7 +73,7 @@ if [[ -n "${DISCORD_WEBHOOK:-}" ]]; then
   ACTION_JSON="$(api action.get '{"filter":{"name":["Report problems to Zabbix administrators"]},"output":["actionid"],"selectOperations":"extend"}')"
   ACTION="$(jq -r '.[0].actionid' <<< "${ACTION_JSON}")"
   OPS="$(jq -c '[.[0].operations[] | del(.operationid, .actionid) | .esc_step_from = "2" | .esc_step_to = "2" | .esc_period = "0"
-    | (if .opmessage then .opmessage |= del(.operationid) else . end)
+    | (if .opmessage then .opmessage |= {default_msg, mediatypeid} else . end)
     | (if .opmessage_grp then .opmessage_grp |= map({usrgrpid}) else . end)
     | (if .opmessage_usr then .opmessage_usr |= map({userid}) else . end)]' <<< "${ACTION_JSON}")"
   api action.update "$(jq -nc --arg a "${ACTION}" --argjson ops "${OPS}" '{actionid: $a, status: 0, esc_period: "5m", pause_suppressed: 1,
