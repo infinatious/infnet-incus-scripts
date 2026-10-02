@@ -6,7 +6,6 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 1
 fi
 
-OVN_MTU='1442'
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CLOUD_INIT_FILE="${SCRIPT_DIR}/cloud-init-user-data.yaml"
 CLOUDBASE_INIT_FILE="${SCRIPT_DIR}/cloudbase-init-user-data.yaml"
@@ -15,6 +14,10 @@ ENV_FILE="${SCRIPT_DIR}/.env"
 [[ -f "${ENV_FILE}" ]] || { echo "Error: ${ENV_FILE} not found." >&2; exit 1; }
 # shellcheck source=/dev/null
 source "${ENV_FILE}"
+# Project network MTU: 1442 = 1500 minus OVN's Geneve overhead (58). Set
+# OVN_MTU=1500 in .env where the hosts' tunnel network (OVN_ENCAP_IP) carries
+# jumbo frames.
+OVN_MTU="${OVN_MTU:-1442}"
 [[ -f "${SCRIPT_DIR}/lib/public-ip.sh" ]] || { echo "Error: ${SCRIPT_DIR}/lib/public-ip.sh not found." >&2; exit 1; }
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/public-ip.sh"
