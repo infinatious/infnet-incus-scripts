@@ -635,7 +635,7 @@ Each site's `.env` holds its own server's `ZABBIX_*` values, written by `zabbix-
 - **Agents run active-only.** `monitoring/zabbix-agent-install.sh` sets `Server=` (nothing listens) and `ServerActive=<public IP>;<internal IP>`. The agent tries the second address when the first fails, which happens inside the server's own project.
   - Instances need no inbound rule.
   - The Zabbix server's ACL allows tcp/10051 from INFNET and both sites' public ranges.
-- **Windows:** imported or Windows VMs get ICMP and port checks only. Install the agent by hand and link a Windows template; the scripts never unlink templates.
+- **Windows:** the Zabbix agent isn't in the image; it's installed during post-install setup (`C:\INF\Install-ZabbixAgent.ps1`). Afterwards run `monitoring/sync-zabbix-hosts.sh`, which sees the "Zabbix Agent 2" service through the Incus agent and links "Windows by Zabbix agent active". VMs without the Incus agent (e.g. imported ones) get the template linked by hand. The scripts never unlink templates.
 - **Alerts (Discord): only actual issues.** They go through the built-in Discord media type on the `Admin` user and the default "Report problems to Zabbix administrators" action, configured by `zabbix-configure.sh`:
   - Only **production** hosts: tag `env: p`, which the scripts set from the instance name's prefix; the built-in "Zabbix server" host is tagged too. QA, test and dev instances never alert.
   - Only severity **Average and up**: host unreachable, agent gone, a TCP port down. Warning-level problems (latency, "host restarted", swap) stay in the web UI.

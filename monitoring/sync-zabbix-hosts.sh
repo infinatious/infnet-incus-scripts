@@ -4,9 +4,10 @@
 # "Project ID: N"), updates addresses, groups and TCP port checks, and removes
 # managed hosts of this site (ZABBIX_SITE) whose instance is gone. Idempotent.
 #   ./monitoring/sync-zabbix-hosts.sh [--no-prune]
-# The Linux agent template is linked when the instance's agent was installed
-# by these scripts (/etc/zabbix/zabbix_agent2.d/infnet.conf); templates are
-# never unlinked.
+# The agent template is linked when the instance runs an agent: Linux
+# "Linux by Zabbix agent active" (agent installed by these scripts), Windows
+# "Windows by Zabbix agent active" (the "Zabbix Agent 2" service, installed in
+# post-install setup; run this sync afterwards). Templates are never unlinked.
 set -uo pipefail
 
 fail() { echo "Error: $*" >&2; exit 1; }
@@ -28,10 +29,17 @@ case "${1:-}" in
 esac
 zabbix_configured || fail 'Zabbix is not configured in .env (ZABBIX_URL, ZABBIX_API_TOKEN, ZABBIX_SITE).'
 
-# Whether an instance runs an agent installed by these scripts.
+# Whether an instance runs a Zabbix agent: on Linux one installed by these
+# scripts; on Windows the "Zabbix Agent 2" service (installed during post-install
+# setup; checked through the Incus agent, so VMs without it count as "no").
 has_agent() {
-  local instance="$1" project="$2"
-  timeout 20 incus exec "${instance}" --project "${project}" -- test -f /etc/zabbix/zabbix_agent2.d/infnet.conf </dev/null >/dev/null 2>&1
+  local instance="$1" project="$2" family="$3"
+  if [[ "${family}" == 'win' ]]; then
+    timeout 30 incus exec "${instance}" --project "${project}" -- powershell -NoProfile -Command \
+      "if (Get-Service 'Zabbix Agent 2' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" </dev/null >/dev/null 2>&1
+  else
+    timeout 20 incus exec "${instance}" --project "${project}" -- test -f /etc/zabbix/zabbix_agent2.d/infnet.conf </dev/null >/dev/null 2>&1
+  fi
 }
 
 mapfile -t PROJECTS < <(incus project list -f json | jq -r '.[] | select(.description | test("^Project ID: [0-9]+$")) | .name' | sort)
@@ -42,7 +50,7 @@ for project in "${PROJECTS[@]}"; do
     SEEN[${instance}]=1
     internal_ip="$(instance_internal_ipv4 "${instance}" "${project}")"
     agent='no'
-    [[ "${family}" == 'linux' && "${status}" == 'Running' ]] && has_agent "${instance}" "${project}" && agent='yes'
+    [[ "${status}" == 'Running' ]] && has_agent "${instance}" "${project}" "${family}" && agent='yes'
     echo "== ${project}/${instance} (${status}, ${family}, agent ${agent})"
     zabbix_register_instance "${instance}" "${project}" "${family}" "${public_ip}" "${internal_ip}" "${agent}" || echo "   (failed, see above)"
   done < <(incus list --project "${project}" -f json | jq -r '.[] |
