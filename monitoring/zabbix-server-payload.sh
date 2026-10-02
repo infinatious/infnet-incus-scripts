@@ -88,6 +88,10 @@ nginx -t 2>&1 | tail -1
 [[ -s /root/zabbix/admin-password ]] || openssl rand -base64 18 | tr -d '/+=' > /root/zabbix/admin-password
 chmod 600 /root/zabbix/*
 
+# Agent2 on the server itself. If cloud-init already installed it active-only
+# (Server= empty), allow passive checks from the server on localhost: the
+# built-in "Zabbix server" host polls 127.0.0.1:10050.
+[[ -f /etc/zabbix/zabbix_agent2.d/infnet.conf ]] && sed -i 's/^Server=$/Server=127.0.0.1/' /etc/zabbix/zabbix_agent2.d/infnet.conf
 # Agent2 on the server itself.
 sed -i -E "s|^Hostname=.*|Hostname=Zabbix server|" /etc/zabbix/zabbix_agent2.conf
 
