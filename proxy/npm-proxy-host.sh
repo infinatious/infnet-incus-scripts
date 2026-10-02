@@ -194,7 +194,12 @@ add_host() {
   [[ -n "${DNS}" ]] && dns_set "${DOMAIN}" add
 
   if [[ -n "${NPM_DNS_TARGET:-}" ]]; then
-    status="$(curl -sk -o /dev/null -m 15 -w '%{http_code}' --resolve "${DOMAIN}:443:${NPM_DNS_TARGET}" "https://${DOMAIN}/")"
+    # NPM reloads nginx in the background, so give the new host a moment.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      status="$(curl -sk -o /dev/null -m 15 -w '%{http_code}' --resolve "${DOMAIN}:443:${NPM_DNS_TARGET}" "https://${DOMAIN}/")"
+      [[ "${status}" != '000' ]] && break
+      sleep 2
+    done
     echo "Check: https://${DOMAIN}/ via ${NPM_DNS_TARGET} answered HTTP ${status}$( [[ "${status}" =~ ^(502|504|000)$ ]] && echo ' - the backend may be unreachable from NPM (firewall group?)')."
   fi
 }
