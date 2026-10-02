@@ -76,10 +76,18 @@ if [[ -n "${DISCORD_WEBHOOK:-}" ]]; then
     | (if .opmessage then .opmessage |= {default_msg, mediatypeid} else . end)
     | (if .opmessage_grp then .opmessage_grp |= map({usrgrpid}) else . end)
     | (if .opmessage_usr then .opmessage_usr |= map({userid}) else . end)]' <<< "${ACTION_JSON}")"
+  # Production only: the problem's host must carry the tag env=p (the scripts
+  # tag every instance by its name prefix; condition type 26 = tag value,
+  # value2 = tag name). evaltype 1 = AND.
   api action.update "$(jq -nc --arg a "${ACTION}" --argjson ops "${OPS}" '{actionid: $a, status: 0, esc_period: "5m", pause_suppressed: 1,
-    filter: {evaltype: 0, conditions: [{conditiontype: 4, operator: 5, value: "3"}]},
+    filter: {evaltype: 1, conditions: [{conditiontype: 4, operator: 5, value: "3"}, {conditiontype: 26, operator: 0, value: "p", value2: "env"}]},
     operations: $ops, recovery_operations: [{operationtype: 11, opmessage: {default_msg: 1}}]}')" >/dev/null
-  echo "Discord: media type enabled; Admin notified for Average and up, after 5 minutes; recoveries only for notified problems."
+  # The built-in "Zabbix server" host monitors this production server itself.
+  ZS="$(api host.get '{"filter":{"host":["Zabbix server"]},"output":["hostid"],"selectTags":"extend"}')"
+  if [[ "$(jq -r '.[0].hostid // empty' <<< "${ZS}")" != '' ]] && ! jq -e '.[0].tags | any(.tag == "env")' <<< "${ZS}" >/dev/null; then
+    api host.update "$(jq -c '.[0] | {hostid, tags: (.tags | map({tag, value}) + [{tag: "env", value: "p"}])}' <<< "${ZS}")" >/dev/null
+  fi
+  echo "Discord: production hosts (tag env=p) only, severity Average and up, after 5 minutes; recoveries only for notified problems."
 fi
 
 # --- Host group for instances ---

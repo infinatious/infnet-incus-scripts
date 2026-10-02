@@ -637,6 +637,7 @@ Each site's `.env` holds its own server's `ZABBIX_*` values, written by `zabbix-
   - The Zabbix server's ACL allows tcp/10051 from INFNET and both sites' public ranges.
 - **Windows:** imported or Windows VMs get ICMP and port checks only. Install the agent by hand and link a Windows template; the scripts never unlink templates.
 - **Alerts (Discord): only actual issues.** They go through the built-in Discord media type on the `Admin` user and the default "Report problems to Zabbix administrators" action, configured by `zabbix-configure.sh`:
+  - Only **production** hosts: tag `env: p`, which the scripts set from the instance name's prefix; the built-in "Zabbix server" host is tagged too. QA, test and dev instances never alert.
   - Only severity **Average and up**: host unreachable, agent gone, a TCP port down. Warning-level problems (latency, "host restarted", swap) stay in the web UI.
   - Only problems **still open after 5 minutes**.
   - Port checks depend on the host's "Unavailable by ICMP ping" trigger: a host that's down raises one alert, not one per port.
