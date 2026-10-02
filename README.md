@@ -672,6 +672,7 @@ Without `ZABBIX_*` in `.env` everything Zabbix-related is skipped with a warning
   - **Proxy host:** SSL forced and HTTP/2, like the existing hosts. `--websockets` and `--max-body` (as `client_max_body_size`) are optional.
   - **DNS:** the name gets an A record → `NPM_DNS_TARGET` in the Technitium zone that contains it. For `infinatio.us` that's a **forwarder zone** (forwarder `this-server`, in the cluster catalog): only the names added there answer internally, and every other name resolves exactly as it does publicly from Cloudflare. `--create-zone` makes such a zone for a new domain.
   - Edits always go to the zone's primary node; a secondary copy relays them.
+  - It also adds a local **HTTPS (SVCB) record** without ECH. Otherwise the zone forwards Cloudflare's public one, whose ECH key makes browsers connect to NPM with the cover name `cloudflare-ech.com`, and NPM rejects that (`SSL_ERROR_UNRECOGNIZED_NAME_ALERT`). Any name overridden by hand in a forwarder zone needs the same record.
   - At the end it requests the site through NPM. A 502/504 usually means the backend firewall doesn't allow NPM's address (`137.152.231.105`) yet.
 - **`--remove`** deletes the proxy host, its certificate (unless another host uses it, or `--keep-cert`) and the DNS record.
 - **`--no-dns`** skips Technitium.

@@ -143,7 +143,19 @@ dns_set() {
       --data-urlencode 'type=A' --data-urlencode "ipAddress=${NPM_DNS_TARGET}" --data-urlencode 'ttl=300' \
       --data-urlencode 'overwrite=true' --data-urlencode "comments=NPM proxy host (proxy/npm-proxy-host.sh)" \
       && echo "DNS: ${domain} -> ${NPM_DNS_TARGET} in zone '${zone}'."
+    # A local HTTPS (SVCB) record too: otherwise the public one is forwarded,
+    # and Cloudflare's carries ECH, so browsers reach NPM with the outer name
+    # cloudflare-ech.com instead of <domain> and NPM rejects the handshake
+    # (SSL_ERROR_UNRECOGNIZED_NAME_ALERT).
+    technitium zones/records/add ${node:+--data-urlencode "node=${node}"} --data-urlencode "zone=${zone}" --data-urlencode "domain=${domain}" \
+      --data-urlencode 'type=HTTPS' --data-urlencode 'ttl=300' --data-urlencode 'svcPriority=1' --data-urlencode 'svcTargetName=.' \
+      --data-urlencode 'svcParams=alpn|h2,http/1.1' --data-urlencode 'overwrite=true' \
+      --data-urlencode "comments=Local HTTPS record without Cloudflare ECH (proxy/npm-proxy-host.sh)" \
+      && echo "DNS: ${domain} HTTPS record (no ECH) in zone '${zone}'."
   else
+    technitium zones/records/delete ${node:+--data-urlencode "node=${node}"} --data-urlencode "zone=${zone}" --data-urlencode "domain=${domain}" \
+      --data-urlencode 'type=HTTPS' --data-urlencode 'svcPriority=1' --data-urlencode 'svcTargetName=.' \
+      --data-urlencode 'svcParams=alpn|h2,http/1.1' >/dev/null 2>&1 || true
     technitium zones/records/delete ${node:+--data-urlencode "node=${node}"} --data-urlencode "zone=${zone}" --data-urlencode "domain=${domain}" \
       --data-urlencode 'type=A' --data-urlencode "ipAddress=${NPM_DNS_TARGET}" \
       && echo "DNS: removed ${domain} -> ${NPM_DNS_TARGET} from zone '${zone}'."
