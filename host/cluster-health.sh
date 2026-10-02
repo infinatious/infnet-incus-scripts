@@ -310,21 +310,34 @@ done
 # --- Backups -------------------------------------------------------------------------
 
 section 'Backups'
+# sudo without a prompt if possible (passwordless, or credentials cached by
+# "sudo -v"); otherwise read what kauffpc can.
+SUDO_N=''; sudo -n true 2>/dev/null && SUDO_N='sudo -n'
 if mountpoint -q "${NFS_BACKUP_DIR}"; then
   now="$(date +%s)"
   # Newest backup per project/instance: "<epoch> <project>/<instance>".
   declare -A NEWEST
   while read -r ts path; do
     key="${path%/*}"; [[ -z "${NEWEST[${key}]:-}" || "${ts%.*}" -gt "${NEWEST[${key}]}" ]] && NEWEST[${key}]="${ts%.*}"
-  done < <(sudo find "${NFS_BACKUP_DIR}" -mindepth 3 -maxdepth 3 -name '*.tar.gz' -printf '%T@ %P\n' 2>/dev/null)
+  done < <(${SUDO_N} find "${NFS_BACKUP_DIR}" -mindepth 3 -maxdepth 3 -name '*.tar.gz' -printf '%T@ %P\n' 2>/dev/null)
+  UNCHECKED=()
   while IFS=$'\t' read -r project name; do
     newest="${NEWEST[${project}/${name}]:-}"
-    if [[ -z "${newest}" ]]; then warn "${project}/${name}: no backup found"; continue; fi
+    if [[ -z "${newest}" ]]; then
+      # Without sudo, root-only backup folders can't be read: that's
+      # "unknown", not "missing".
+      dir="${NFS_BACKUP_DIR}/${project}"
+      if [[ -z "${SUDO_N}" && -e "${dir}" && ! ( -r "${dir}" && -x "${dir}" && -r "${dir}/${name}" && -x "${dir}/${name}" ) ]]; then
+        UNCHECKED+=("${project}/${name}"); continue
+      fi
+      warn "${project}/${name}: no backup found"; continue
+    fi
     hours=$(( (now - ${newest%.*}) / 3600 ))
     if (( hours >= BACKUP_FAIL_HOURS )); then bad "${project}/${name}: newest backup is ${hours} h old"
     elif (( hours >= BACKUP_WARN_HOURS )); then warn "${project}/${name}: newest backup is ${hours} h old"
     else ok "${project}/${name}: newest backup ${hours} h old"; fi
   done < <(jq -r '.[] | select(.status == "Running") | "\(.project)\t\(.name)"' <<< "${INSTANCES_JSON}" | sort)
+  (( ${#UNCHECKED[@]} == 0 )) || warn "${#UNCHECKED[@]} instance(s) not checked: their backup folders are root-only and sudo needs a password here (run 'sudo -v' first): ${UNCHECKED[*]}"
   last_run="$(find "${NFS_BACKUP_DIR}/.runs" -maxdepth 1 -name '*.json' -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)"
   if [[ -n "${last_run}" ]]; then
     result="$(jq -r '.result // .status // "unknown"' "${last_run}" 2>/dev/null)"
