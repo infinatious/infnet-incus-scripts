@@ -636,7 +636,12 @@ Each site's `.env` holds its own server's `ZABBIX_*` values, written by `zabbix-
   - Instances need no inbound rule.
   - The Zabbix server's ACL allows tcp/10051 from INFNET and both sites' public ranges.
 - **Windows:** imported or Windows VMs get ICMP and port checks only. Install the agent by hand and link a Windows template; the scripts never unlink templates.
-- **Alerts:** problems of severity Warning and up go to Discord, through the built-in Discord media type on the `Admin` user and the default "Report problems to Zabbix administrators" action.
+- **Alerts (Discord): only actual issues.** They go through the built-in Discord media type on the `Admin` user and the default "Report problems to Zabbix administrators" action, configured by `zabbix-configure.sh`:
+  - Only severity **Average and up**: host unreachable, agent gone, a TCP port down. Warning-level problems (latency, "host restarted", swap) stay in the web UI.
+  - Only problems **still open after 5 minutes**.
+  - A recovery message only for problems that were announced.
+  - Nothing during maintenance windows.
+- **Containers** get the host macro `{$LOAD_AVG_PER_CPU.MAX.WARN}=1000`. They see the *host's* load average divided by their own CPU count, so the template's load trigger only produced false alarms. CPU utilisation is per-container and still alerts.
 
 ### Setting it up
 

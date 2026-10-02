@@ -152,7 +152,23 @@ zabbix_register_instance() {
     zabbix_api host.update "$(jq -c 'del(.templates)' <<< "${params}")" >/dev/null || return 1
     zabbix_set_interface "${host_id}" "${address}" || return 1
   fi
+  # Containers see the HOST's load average but their own CPU count, so the
+  # agent template's per-CPU load trigger fires on busy hosts (false alarms).
+  # Their CPU utilisation is per-container and still alerts.
+  [[ "${type}" == 'container' ]] && zabbix_set_macro "${host_id}" '{$LOAD_AVG_PER_CPU.MAX.WARN}' '1000' \
+    'Containers see the host load average; the per-CPU load trigger is meaningless here'
   zabbix_sync_ports "${instance}" "${project}" "${host_id}"
+}
+
+# Creates or updates a host macro.
+zabbix_set_macro() {
+  local host_id="$1" macro="$2" value="$3" description="${4:-}" existing
+  existing="$(zabbix_api usermacro.get "$(jq -nc --arg h "${host_id}" --arg m "${macro}" '{hostids: [$h], filter: {macro: $m}, output: ["hostmacroid", "value"]}')")" || return 1
+  if [[ "$(jq -r 'length' <<< "${existing}")" == '0' ]]; then
+    zabbix_api usermacro.create "$(jq -nc --arg h "${host_id}" --arg m "${macro}" --arg v "${value}" --arg d "${description}" '{hostid: $h, macro: $m, value: $v, description: $d}')" >/dev/null
+  elif [[ "$(jq -r '.[0].value' <<< "${existing}")" != "${value}" ]]; then
+    zabbix_api usermacro.update "$(jq -nc --arg id "$(jq -r '.[0].hostmacroid' <<< "${existing}")" --arg v "${value}" '{hostmacroid: $id, value: $v}')" >/dev/null
+  fi
 }
 
 # Keeps a host's main agent interface on the check address (or removes the

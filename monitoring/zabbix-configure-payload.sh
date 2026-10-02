@@ -62,10 +62,24 @@ if [[ -n "${DISCORD_WEBHOOK:-}" ]]; then
   # Severity bitmask: Warning 4 + Average 8 + High 16 + Disaster 32.
   api user.update "$(jq -nc --arg u "${ADMIN_ID}" --arg mt "${MT}" --arg to "${DISCORD_WEBHOOK}" \
     '{userid: $u, medias: [{mediatypeid: $mt, sendto: $to, active: 0, severity: 60, period: "1-7,00:00-24:00"}]}')" >/dev/null
-  ACTION="$(api action.get '{"filter":{"name":["Report problems to Zabbix administrators"]},"output":["actionid"]}' | jq -r '.[0].actionid')"
-  # Condition type 4 = trigger severity, operator 5 = ">=", value 2 = Warning.
-  api action.update "$(jq -nc --arg a "${ACTION}" '{actionid: $a, status: 0, filter: {evaltype: 0, conditions: [{conditiontype: 4, operator: 5, value: "2"}]}}')" >/dev/null
-  echo "Discord: media type enabled, Admin notified for Warning and up, action enabled."
+  # Only actual issues reach Discord:
+  #   - severity Average and up (condition type 4 = trigger severity,
+  #     operator 5 = ">=", value 3 = Average); Warning-level problems stay in
+  #     the web UI only;
+  #   - only problems still open after 5 minutes (the message is escalation
+  #     step 2 of 5-minute steps), so short blips never notify;
+  #   - recoveries go only to whoever got the problem ("notify all involved").
+  #   - Problems in maintenance are suppressed (pause_suppressed).
+  ACTION_JSON="$(api action.get '{"filter":{"name":["Report problems to Zabbix administrators"]},"output":["actionid"],"selectOperations":"extend"}')"
+  ACTION="$(jq -r '.[0].actionid' <<< "${ACTION_JSON}")"
+  OPS="$(jq -c '[.[0].operations[] | del(.operationid, .actionid) | .esc_step_from = "2" | .esc_step_to = "2" | .esc_period = "0"
+    | (if .opmessage then .opmessage |= del(.operationid) else . end)
+    | (if .opmessage_grp then .opmessage_grp |= map({usrgrpid}) else . end)
+    | (if .opmessage_usr then .opmessage_usr |= map({userid}) else . end)]' <<< "${ACTION_JSON}")"
+  api action.update "$(jq -nc --arg a "${ACTION}" --argjson ops "${OPS}" '{actionid: $a, status: 0, esc_period: "5m", pause_suppressed: 1,
+    filter: {evaltype: 0, conditions: [{conditiontype: 4, operator: 5, value: "3"}]},
+    operations: $ops, recovery_operations: [{operationtype: 11, opmessage: {default_msg: 1}}]}')" >/dev/null
+  echo "Discord: media type enabled; Admin notified for Average and up, after 5 minutes; recoveries only for notified problems."
 fi
 
 # --- Host group for instances ---
