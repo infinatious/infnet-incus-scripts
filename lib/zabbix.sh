@@ -221,7 +221,10 @@ zabbix_sync_ports() {
   icmp_trigger="$(zabbix_api trigger.get "$(jq -nc --arg h "${host_id}" '{hostids: [$h], search: {description: "Unavailable by ICMP ping"}, output: ["triggerid"]}')" | jq -r '.[0].triggerid // empty')"
   zabbix_port_dependency() {
     [[ -n "${icmp_trigger}" ]] || return 0
-    trig="$(zabbix_api trigger.get "$(jq -nc --arg h "${host_id}" --arg k "net.tcp.service[tcp,,$1]" '{hostids: [$h], filter: {}, search: {expression: $k}, output: ["triggerid"], selectDependencies: ["triggerid"]}')")"
+    local item
+    item="$(zabbix_api item.get "$(jq -nc --arg h "${host_id}" --arg k "net.tcp.service[tcp,,$1]" '{hostids: [$h], filter: {key_: $k}, output: ["itemid"]}')" | jq -r '.[0].itemid // empty')"
+    [[ -n "${item}" ]] || return 0
+    trig="$(zabbix_api trigger.get "$(jq -nc --arg i "${item}" '{itemids: [$i], output: ["triggerid"], selectDependencies: ["triggerid"]}')")"
     jq -e --arg d "${icmp_trigger}" '.[0] and (.[0].dependencies | any(.triggerid == $d) | not)' <<< "${trig}" >/dev/null 2>&1 || return 0
     zabbix_api trigger.adddependencies "$(jq -nc --arg t "$(jq -r '.[0].triggerid' <<< "${trig}")" --arg d "${icmp_trigger}" '{triggerid: $t, dependsOnTriggerid: $d}')" >/dev/null
   }
