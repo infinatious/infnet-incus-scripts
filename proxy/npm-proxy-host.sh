@@ -175,7 +175,7 @@ add_host() {
     echo "Requesting a Let's Encrypt certificate for ${DOMAIN} (Cloudflare DNS challenge, ~1 minute)..."
     cert_id="$(npm_api POST '/nginx/certificates' "$(jq -nc --arg d "${DOMAIN}" --arg c "${creds}" \
       '{provider: "letsencrypt", nice_name: $d, domain_names: [$d],
-        meta: {dns_challenge: true, dns_provider: "cloudflare", dns_provider_credentials: $c, propagation_seconds: 30, letsencrypt_agree: true}}')" \
+        meta: {dns_challenge: true, dns_provider: "cloudflare", dns_provider_credentials: $c, propagation_seconds: 30}}')" \
       | jq -r '.id // empty')"
     [[ -n "${cert_id}" ]] || fail "certificate request for ${DOMAIN} failed (see above)."
     echo "Certificate ${cert_id} issued."
