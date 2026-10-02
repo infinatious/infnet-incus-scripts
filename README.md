@@ -629,6 +629,7 @@ Each site's `.env` holds its own server's `ZABBIX_*` values, written by `zabbix-
   - Instances in the server's own project (`ZABBIX_PROJECT`) are checked on their internal IP, because of hairpin NAT.
   - A port only counts if its ACL rule allows anywhere or a range containing `ZABBIX_SERVER_IP`. Single ports only, no ranges.
   - To monitor an INFNET-only port, also allow it from `ZABBIX_SERVER_IP/32`.
+  - To leave an open port **unchecked**, set the host macro `{$INFNET.SKIP.PORTS}` (e.g. `443` or `443,8080`) on its Zabbix host. The next sync or firewall change removes the check and won't recreate it.
 - **Agents run active-only.** `monitoring/zabbix-agent-install.sh` sets `Server=` (nothing listens) and `ServerActive=<public IP>;<internal IP>`. The agent tries the second address when the first fails, which happens inside the server's own project.
   - Instances need no inbound rule.
   - The Zabbix server's ACL allows tcp/10051 from INFNET and both sites' public ranges.

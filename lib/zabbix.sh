@@ -169,7 +169,8 @@ zabbix_set_interface() {
   fi
 }
 
-# Makes the host's TCP port checks match the ACL: one simple check
+# Makes the host's TCP port checks match the ACL (minus the host macro
+# {$INFNET.SKIP.PORTS}): one simple check
 # net.tcp.service[tcp,,PORT] plus a trigger (3 failed checks in a row) per
 # port. Arguments: instance project [host_id].
 zabbix_sync_ports() {
@@ -181,6 +182,13 @@ zabbix_sync_ports() {
   # Port checks run from the server, so they need the host's check address.
   interface_id="$(zabbix_api hostinterface.get "$(jq -nc --arg h "${host_id}" '{hostids: [$h], filter: {type: 1, main: 1}, output: ["interfaceid"]}')" | jq -r '.[0].interfaceid // empty')"
   [[ -n "${interface_id}" ]] && mapfile -t wanted < <(zabbix_acl_ports "${instance}" "${project}")
+  # Ports listed in the host macro {$INFNET.SKIP.PORTS} (e.g. "443" or
+  # "443,8080") are open in the ACL but deliberately not checked.
+  local skip
+  skip="$(zabbix_api usermacro.get "$(jq -nc --arg h "${host_id}" '{hostids: [$h], filter: {macro: "{$INFNET.SKIP.PORTS}"}, output: ["value"]}')" | jq -r '.[0].value // empty')"
+  if [[ -n "${skip}" && ${#wanted[@]} -gt 0 ]]; then
+    mapfile -t wanted < <(printf '%s\n' "${wanted[@]}" | grep -vxF -f <(tr ', ' '\n\n' <<< "${skip}" | sed '/^$/d'))
+  fi
   existing="$(zabbix_api item.get "$(jq -nc --arg h "${host_id}" --arg t "${ZABBIX_PORT_TAG}" '{hostids: [$h], tags: [{tag: "source", value: $t, operator: 1}], output: ["itemid", "key_"]}')")" || return 1
 
   # Remove checks for ports no longer open.
