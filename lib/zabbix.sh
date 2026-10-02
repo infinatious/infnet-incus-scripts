@@ -125,7 +125,9 @@ zabbix_register_instance() {
   fi
   [[ "${agent}" == 'auto' ]] && { [[ "${family}" == 'linux' ]] && agent='yes' || agent='no'; }
   if [[ "${agent}" == 'yes' ]]; then
-    tid="$(zabbix_template_id 'Linux by Zabbix agent active')" && [[ -n "${tid}" ]] && templates="$(jq -c --arg t "${tid}" '. + [{templateid: $t}]' <<< "${templates}")"
+    local agent_template='Linux by Zabbix agent active'
+    [[ "${family}" == 'win' ]] && agent_template='Windows by Zabbix agent active'
+    tid="$(zabbix_template_id "${agent_template}")" && [[ -n "${tid}" ]] && templates="$(jq -c --arg t "${tid}" '. + [{templateid: $t}]' <<< "${templates}")"
   fi
 
   env_code="${instance:0:1}"
