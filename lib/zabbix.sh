@@ -226,7 +226,8 @@ zabbix_sync_ports() {
     [[ -n "${item}" ]] || return 0
     trig="$(zabbix_api trigger.get "$(jq -nc --arg i "${item}" '{itemids: [$i], output: ["triggerid"], selectDependencies: ["triggerid"]}')")"
     jq -e --arg d "${icmp_trigger}" '.[0] and (.[0].dependencies | any(.triggerid == $d) | not)' <<< "${trig}" >/dev/null 2>&1 || return 0
-    zabbix_api trigger.adddependencies "$(jq -nc --arg t "$(jq -r '.[0].triggerid' <<< "${trig}")" --arg d "${icmp_trigger}" '{triggerid: $t, dependsOnTriggerid: $d}')" >/dev/null
+    zabbix_api trigger.update "$(jq -nc --arg t "$(jq -r '.[0].triggerid' <<< "${trig}")" --arg d "${icmp_trigger}" \
+      --argjson have "$(jq -c '[.[0].dependencies[] | {triggerid}]' <<< "${trig}")" '{triggerid: $t, dependencies: ($have + [{triggerid: $d}])}')" >/dev/null
   }
 
   # Add checks for newly opened ports.
