@@ -462,6 +462,8 @@ sudo ./branding/uefi-logo.sh revert   # back to the stock firmware
 
 Creates the project (description `Project ID: 42`, which the other scripts use to find it), an OVN network `demo` on `<IPV4_SUBNET_PREFIX>.42.1/24` behind `UPLINK_NETWORK`, and the profiles `demo-linux` (1 CPU, 2 GiB, 20 GiB, cloud-init from `cloud-init-user-data.yaml`) `demo-win` (2 CPU, 4 GiB, 64 GiB, cloudbase-init from `cloudbase-init-user-data.yaml`) and `demo-linux-docker` (see [Docker profile](#docker-profile)). It warns if the uplink has no `ipv4.routes`, since instances in the project couldn't get public IPs.
 
+New Linux instances take their timezone from the profile's cloud-init. Set `INSTANCE_TIMEZONE` in each site's `.env` (us-west `America/Phoenix`, us-east `America/Detroit`). Without it, the zone in `cloud-init-user-data.yaml` applies. After changing it, run `./deploy-project.sh --all-projects --update-payloads`; that only affects instances created afterwards.
+
 Projects created before a profile was added (e.g. the Docker one) get it with:
 
 ```bash

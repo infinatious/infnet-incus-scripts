@@ -116,15 +116,20 @@ zabbix_agent_runcmd() {
     "${ZABBIX_SERVER_ACTIVE}" "${PROJECT_NAME}"
 }
 
-# The Linux payload: cloud-init-user-data.yaml as is, plus the Zabbix agent
+# The Linux payload: cloud-init-user-data.yaml with this site's timezone
+# (INSTANCE_TIMEZONE in .env, else the file's own), plus the Zabbix agent
 # step when monitoring is configured.
 linux_user_data() {
-  local agent
+  local agent base
   agent="$(zabbix_agent_runcmd)"
+  base="$(cat "${CLOUD_INIT_FILE}")"
+  if [[ -n "${INSTANCE_TIMEZONE:-}" ]]; then
+    base="$(sed -E "s|^timezone:.*|timezone: ${INSTANCE_TIMEZONE}|" <<< "${base}")"
+  fi
   if [[ -z "${agent}" ]]; then
-    cat "${CLOUD_INIT_FILE}"
+    printf '%s' "${base}"
   else
-    printf '%s\n  - %s\n' "$(cat "${CLOUD_INIT_FILE}")" "${agent}"
+    printf '%s\n  - %s\n' "${base}" "${agent}"
   fi
 }
 
