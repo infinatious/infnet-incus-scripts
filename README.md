@@ -657,6 +657,33 @@ Without `ZABBIX_*` in `.env` everything Zabbix-related is skipped with a warning
 - **Discord gotcha:** Zabbix's Discord script calls `/api/v10/…`, which the legacy `discordapp.com` host rejects ("Invalid API version"). `zabbix-configure.sh` rewrites the webhook to `discord.com`.
 - **Frontend URL gotcha:** webhook media types also need the global macro `{$ZABBIX.URL}` set to the frontend URL. `zabbix-configure.sh` sets it.
 
+## Reverse proxy (NPM)
+
+`proxy/npm-proxy-host.sh` (also `start.sh` → Misc) manages proxy hosts on Nginx Proxy Manager (`pd19-ngxpm-ct01` in `infra-edge`), along with their internal DNS:
+
+```bash
+./proxy/npm-proxy-host.sh --list
+./proxy/npm-proxy-host.sh --add --domain app.infinatio.us --forward http://inf-10020.phxaz.infinatio.us:3000 [--websockets] [--max-body 10G]
+./proxy/npm-proxy-host.sh --remove --domain app.infinatio.us
+```
+
+- **`--add`:**
+  - **Certificate:** reuses an existing one for the name, or requests one from Let's Encrypt through the **Cloudflare DNS challenge** (about a minute). It uses the same Cloudflare token as the existing certificates, read from NPM, so there's no second copy in `.env`.
+  - **Proxy host:** SSL forced and HTTP/2, like the existing hosts. `--websockets` and `--max-body` (as `client_max_body_size`) are optional.
+  - **DNS:** the name gets an A record → `NPM_DNS_TARGET` in the Technitium zone that contains it. For `infinatio.us` that's a **forwarder zone** (forwarder `this-server`, in the cluster catalog): only the names added there answer internally, and every other name resolves exactly as it does publicly from Cloudflare. `--create-zone` makes such a zone for a new domain.
+  - Edits always go to the zone's primary node; a secondary copy relays them.
+  - At the end it requests the site through NPM. A 502/504 usually means the backend firewall doesn't allow NPM's address (`137.152.231.105`) yet.
+- **`--remove`** deletes the proxy host, its certificate (unless another host uses it, or `--keep-cert`) and the DNS record.
+- **`--no-dns`** skips Technitium.
+- **Public DNS (Cloudflare) is never changed.**
+
+| `.env` | Meaning |
+|---|---|
+| `NPM_URL` | NPM admin API, e.g. `http://137.152.231.105:81` |
+| `NPM_EMAIL`, `NPM_PASSWORD` | An NPM user for the scripts (NPM → Users, role Administrator) |
+| `NPM_DNS_TARGET` | Address the proxy hosts get in internal DNS (NPM's public IP) |
+| `NPM_INSTANCE`, `NPM_PROJECT` | Incus instance running NPM, to read its Cloudflare credentials file if the API doesn't return them |
+
 ## DNS registration
 
 `create-instance.sh`, `delete-instance.sh` and `delete-project.sh` register and remove an A record in [Technitium DNS](https://technitium.com/dns/) for each instance, pointing `<instance-name>.<zone>` (e.g. `p42-tstng-ct01.infnet`) at the instance's public 1:1 NAT address, not its internal OVN address. This is driven by `dns/technitium-dns.sh`, a small shared helper.

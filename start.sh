@@ -77,6 +77,7 @@ MENU_5=(
   'Sync DNS records (dry run)'                    'dns/sync-dns-records.sh --dry-run'
   'Manage images and aliases'                     'manage-images.sh'
   'Sync Zabbix hosts'                             'monitoring/sync-zabbix-hosts.sh'
+  'Reverse proxy hosts (NPM + DNS)'               'proxy/npm-proxy-host.sh'
 )
 
 show_header() {
