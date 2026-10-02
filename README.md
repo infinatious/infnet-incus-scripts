@@ -607,7 +607,16 @@ The restored instance is imported stopped. If the backup had a public IP, the ne
 
 ## Zabbix monitoring
 
-Zabbix monitors the **instances**, both containers and VMs (not the Incus hosts). Instances are registered automatically, the same way as DNS:
+Zabbix monitors the **instances**, both containers and VMs (not the Incus hosts). Instances are registered automatically, the same way as DNS.
+
+**Each site has its own Zabbix server**, so monitoring traffic stays inside the site and doesn't depend on the link between the sites:
+
+| Site | Server | `.env` `ZABBIX_URL` |
+|---|---|---|
+| us-west | `pd25-zabbx-ct01` (infra-monitoring, ID 25) | `https://137.152.231.61` |
+| us-east | `pd26-zabbx-ct01` (infra-monitoring, ID 26) | `https://137.152.235.56` |
+
+Each site's `.env` holds its own server's `ZABBIX_*` values, written by `zabbix-configure.sh` on that site.
 
 | When | What happens in Zabbix |
 |---|---|
@@ -631,7 +640,7 @@ Zabbix monitors the **instances**, both containers and VMs (not the Incus hosts)
 ```bash
 # 1. Server: an Ubuntu 26.04 container in the monitoring project, then Zabbix 7.4 + PostgreSQL + nginx (own TLS, self-signed)
 ./create-instance.sh --project-id 25 --environment p --service-code zabbx --profile-type linux --image-alias ubuntu2604 --cpu 4 --ram 8 --disk 100 --public-ip random
-./monitoring/install-zabbix-server.sh --project-id 25 --instance pd25-zabbx-ct01
+./monitoring/install-zabbix-server.sh --project-id 25 --instance pd25-zabbx-ct01 [--title 'INFNET Zabbix (WLSOH)']
 ./firewall-manager.sh --project-id 25 --instance pd25-zabbx-ct01 --add tcp:443,80 --source infnet --description "Zabbix web (INFNET)"
 ./firewall-manager.sh --project-id 25 --instance pd25-zabbx-ct01 --add tcp:10051 --source 10.100.0.0/16,137.152.224.0/21,137.152.232.0/21 --description "Zabbix agents"
 # 2. Discord, API user/token, frontend URL; writes ZABBIX_* into this host's .env (copy them to the other members)
