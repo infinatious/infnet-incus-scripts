@@ -215,11 +215,22 @@ zabbix_sync_ports() {
     fi
   done < <(jq -r '.[] | select(.key_ | test("^net.tcp.service\\[tcp,,[0-9]+\\]$")) | "\(.itemid)\t\(.key_ | capture("tcp,,(?<p>[0-9]+)").p)"' <<< "${existing}")
 
+  # Port triggers depend on the host's "Unavailable by ICMP ping" trigger: a
+  # host that is down raises one alert, not one per port.
+  local icmp_trigger trig
+  icmp_trigger="$(zabbix_api trigger.get "$(jq -nc --arg h "${host_id}" '{hostids: [$h], search: {description: "Unavailable by ICMP ping"}, output: ["triggerid"]}')" | jq -r '.[0].triggerid // empty')"
+  zabbix_port_dependency() {
+    [[ -n "${icmp_trigger}" ]] || return 0
+    trig="$(zabbix_api trigger.get "$(jq -nc --arg h "${host_id}" --arg k "net.tcp.service[tcp,,$1]" '{hostids: [$h], filter: {}, search: {expression: $k}, output: ["triggerid"], selectDependencies: ["triggerid"]}')")"
+    jq -e --arg d "${icmp_trigger}" '.[0] and (.[0].dependencies | any(.triggerid == $d) | not)' <<< "${trig}" >/dev/null 2>&1 || return 0
+    zabbix_api trigger.adddependencies "$(jq -nc --arg t "$(jq -r '.[0].triggerid' <<< "${trig}")" --arg d "${icmp_trigger}" '{triggerid: $t, dependsOnTriggerid: $d}')" >/dev/null
+  }
+
   # Add checks for newly opened ports.
   [[ -n "${interface_id}" ]] || return 0
   for port in "${wanted[@]}"; do
     [[ -n "${port}" ]] || continue
-    jq -e --arg k "net.tcp.service[tcp,,${port}]" 'any(.[]; .key_ == $k)' <<< "${existing}" >/dev/null && continue
+    jq -e --arg k "net.tcp.service[tcp,,${port}]" 'any(.[]; .key_ == $k)' <<< "${existing}" >/dev/null && { zabbix_port_dependency "${port}"; continue; }
     zabbix_api item.create "$(jq -nc --arg h "${host_id}" --arg i "${interface_id}" --arg p "${port}" --arg t "${ZABBIX_PORT_TAG}" \
       '{hostid: $h, interfaceid: $i, name: ("TCP port " + $p), key_: ("net.tcp.service[tcp,," + $p + "]"), type: 3, value_type: 3, delay: "1m",
         history: "7d", trends: "90d", valuemapid: "0", tags: [{tag: "source", value: $t}, {tag: "component", value: "network"}]}')" >/dev/null || continue
@@ -227,7 +238,7 @@ zabbix_sync_ports() {
       '{description: ("TCP port " + $p + " is not responding on {HOST.NAME}"), priority: 3,
         expression: ("max(/" + $h + "/net.tcp.service[tcp,," + $p + "],#3)=0"),
         tags: [{tag: "scope", value: "availability"}]}')" >/dev/null \
-      && echo "Zabbix: added a tcp/${port} check to '${instance}'."
+      && echo "Zabbix: added a tcp/${port} check to '${instance}'." && zabbix_port_dependency "${port}"
   done
 }
 

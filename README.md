@@ -639,6 +639,7 @@ Each site's `.env` holds its own server's `ZABBIX_*` values, written by `zabbix-
 - **Alerts (Discord): only actual issues.** They go through the built-in Discord media type on the `Admin` user and the default "Report problems to Zabbix administrators" action, configured by `zabbix-configure.sh`:
   - Only severity **Average and up**: host unreachable, agent gone, a TCP port down. Warning-level problems (latency, "host restarted", swap) stay in the web UI.
   - Only problems **still open after 5 minutes**.
+  - Port checks depend on the host's "Unavailable by ICMP ping" trigger: a host that's down raises one alert, not one per port.
   - A recovery message only for problems that were announced.
   - Nothing during maintenance windows.
 - **Containers** get the host macro `{$LOAD_AVG_PER_CPU.MAX.WARN}=1000`. They see the *host's* load average divided by their own CPU count, so the template's load trigger only produced false alarms. CPU utilisation is per-container and still alerts.
