@@ -1,0 +1,10 @@
+[Unit]
+Description=Email the Incus cluster health report
+After=network-online.target incus.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kauffpc
+WorkingDirectory=/opt/infnet-incus-scripts/host
+ExecStart=/opt/infnet-incus-scripts/host/cluster-health-mail.sh

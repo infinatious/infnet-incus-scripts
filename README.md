@@ -166,6 +166,16 @@ A read-only report (also first under Host Tasks in `start.sh`) that marks each c
 
 It uses `sudo` locally (OVN status, the root-only backup folders), and `ssh` plus `sudo` to the other members by cluster address for the per-host checks. Members it can't reach over ssh show as WARN.
 
+#### Daily email
+
+`host/cluster-health-mail.sh` runs the report and emails it (plain text plus a coloured HTML copy) through `SMTP_RELAY` to `HEALTH_MAIL_TO`; the subject carries the FAIL/WARN counts. `--dry-run` prints it instead, `--to` overrides the recipient. Install the timer (daily 06:00 host time, runs as `kauffpc`) on one member per cluster:
+
+```bash
+sudo cp host/systemd/infnet-cluster-health-mail.service host/systemd/infnet-cluster-health-mail.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now infnet-cluster-health-mail.timer
+```
+
 ### Upgrading Incus
 
 ```bash
