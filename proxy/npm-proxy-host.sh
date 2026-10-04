@@ -79,13 +79,18 @@ npm_api() {
 
 # The Cloudflare credentials of the existing DNS-challenge certificates: from
 # the API if it returns them, else from NPM's credentials file in its instance.
+# An NPM without any certificate yet uses cloudflare-credentials.ini in its data
+# directory instead (dns_cloudflare_api_token=..., root-only).
 cloudflare_credentials() {
-  local creds id
+  local creds id dir="${NPM_DATA_DIR:-/opt/nginx-proxy-manager}"
   creds="$(npm_api GET '/nginx/certificates' | jq -r '[.[] | select(.meta.dns_provider == "cloudflare") | .meta.dns_provider_credentials // empty] | last // empty')"
   if [[ -z "${creds}" && -n "${NPM_INSTANCE:-}" && -n "${NPM_PROJECT:-}" ]]; then
     id="$(npm_api GET '/nginx/certificates' | jq -r '[.[] | select(.meta.dns_provider == "cloudflare") | .id] | max // empty')"
-    [[ -n "${id}" ]] && creds="$(incus exec "${NPM_INSTANCE}" --project "${NPM_PROJECT}" -- \
-      cat "${NPM_DATA_DIR:-/opt/nginx-proxy-manager}/letsencrypt/credentials/credentials-${id}" 2>/dev/null)"
+    if [[ -n "${id}" ]]; then
+      creds="$(incus exec "${NPM_INSTANCE}" --project "${NPM_PROJECT}" -- cat "${dir}/letsencrypt/credentials/credentials-${id}" 2>/dev/null)"
+    else
+      creds="$(incus exec "${NPM_INSTANCE}" --project "${NPM_PROJECT}" -- cat "${dir}/cloudflare-credentials.ini" 2>/dev/null)"
+    fi
   fi
   [[ -n "${creds}" ]] || return 1
   printf '%s\n' "${creds}"
