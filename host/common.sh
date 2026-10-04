@@ -165,11 +165,16 @@ host_add_admin_user() {
   usermod -aG incus-admin "${INCUS_ADMIN_USER}"
 }
 
-# Checks the storage settings: either STORAGE_DEVICE (a whole disk or
-# partition) or, with STORAGE_DEVICE empty, STORAGE_LOOP_SIZE for a ZFS pool in
-# a loop file that Incus creates under /var/lib/incus/disks (for hosts whose
-# only disk holds the OS).
+# Checks the storage settings: STORAGE_DATASET (an existing, empty ZFS dataset on
+# a pool the host already has, e.g. on a Proxmox host), STORAGE_DEVICE (a whole
+# disk or partition) or, with both empty, STORAGE_LOOP_SIZE for a ZFS pool in a
+# loop file that Incus creates under /var/lib/incus/disks (for hosts whose only
+# disk holds the OS).
 host_check_storage_settings() {
+  if [[ -n "${STORAGE_DATASET:-}" ]]; then
+    [[ -z "${STORAGE_DEVICE:-}" ]] || fail 'set either STORAGE_DATASET or STORAGE_DEVICE, not both.'
+    return 0
+  fi
   if [[ -z "${STORAGE_DEVICE:-}" ]]; then
     [[ "${STORAGE_LOOP_SIZE:-}" =~ ^[0-9]+(GiB|TiB)$ ]] \
       || fail 'set STORAGE_DEVICE, or leave it empty and set STORAGE_LOOP_SIZE (e.g. 700GiB) for a loop-file pool.'
@@ -178,14 +183,29 @@ host_check_storage_settings() {
 
 # The storage pool's member-specific config key and value: the device, or the
 # loop file's size.
-host_storage_key() { [[ -n "${STORAGE_DEVICE:-}" ]] && echo source || echo size; }
-host_storage_value() { [[ -n "${STORAGE_DEVICE:-}" ]] && echo "${STORAGE_DEVICE}" || echo "${STORAGE_LOOP_SIZE}"; }
+host_storage_key() { [[ -n "${STORAGE_DATASET:-}${STORAGE_DEVICE:-}" ]] && echo source || echo size; }
+host_storage_value() {
+  if [[ -n "${STORAGE_DATASET:-}" ]]; then echo "${STORAGE_DATASET}"
+  elif [[ -n "${STORAGE_DEVICE:-}" ]]; then echo "${STORAGE_DEVICE}"
+  else echo "${STORAGE_LOOP_SIZE}"; fi
+}
 
 # Checks STORAGE_DEVICE is free for the storage pool, erasing old partition
 # and ZFS signatures when wipe=yes. Destroys everything on the device. For a
 # loop-file pool it checks the filesystem has room instead.
 host_prepare_storage_device() {
   local wipe="$1" dev signatures=() free_gib want_gib
+  # An existing dataset: never create, wipe or destroy pools or disks (the
+  # host's pool may hold other workloads, e.g. Proxmox VM disks).
+  if [[ -n "${STORAGE_DATASET:-}" ]]; then
+    step "Storage: existing ZFS dataset ${STORAGE_DATASET}"
+    [[ "${wipe}" != 'yes' ]] || fail '--wipe-storage-device does not apply to STORAGE_DATASET; nothing is wiped.'
+    zfs list -H -o name "${STORAGE_DATASET}" >/dev/null 2>&1 \
+      || fail "ZFS dataset '${STORAGE_DATASET}' does not exist; create it first (zfs create -o mountpoint=none ${STORAGE_DATASET})."
+    [[ "$(zfs list -H -r -o name "${STORAGE_DATASET}" | wc -l)" == 1 ]] \
+      || fail "ZFS dataset '${STORAGE_DATASET}' is not empty."
+    return 0
+  fi
   if [[ -z "${STORAGE_DEVICE:-}" ]]; then
     step "Storage: ${STORAGE_LOOP_SIZE} loop file under /var/lib/incus/disks"
     mkdir -p /var/lib/incus

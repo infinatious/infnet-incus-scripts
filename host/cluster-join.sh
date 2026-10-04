@@ -26,7 +26,7 @@ Get TOKEN on an existing member with `incus cluster add <this host's short
 hostname>` (or cluster-enable.sh --add-member). Everything cluster-wide
 (networks, projects, profiles, OIDC) comes from the cluster.
 
-This host's .env needs its own STORAGE_DEVICE (or STORAGE_LOOP_SIZE), UPLINK_PARENT (on the same
+This host's .env needs its own STORAGE_DEVICE (or STORAGE_LOOP_SIZE, or STORAGE_DATASET), UPLINK_PARENT (on the same
 public network as the other members) and OVN_ENCAP_IP, plus the same
 OVN_CENTRAL_ADDRESSES as every other member. Hosts listed there run a copy of
 the OVN databases (use three); any others only run the OVN chassis.

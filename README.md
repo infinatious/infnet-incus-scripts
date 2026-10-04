@@ -36,6 +36,7 @@ Edit the **Host bootstrap** and **Authentik OIDC** sections of `.env`:
 | `INCUS_CHANNEL` | Zabbly channel: `stable` or `lts-7.0` - 1:1 NAT needs Incus 7.3+ or a 7.0 LTS release after 7.0.1 (see [1:1 NAT](#11-nat)) |
 | `INCUS_ADMIN_USER` | User added to `incus-admin` so it can run `incus` without sudo |
 | `STORAGE_DEVICE` | Disk (or partition) for the `zpool` ZFS pool, as a `/dev/disk/by-id/` path. Leave empty for a loop-file pool |
+| `STORAGE_DATASET` | Instead of a disk: an existing, empty ZFS dataset on a pool the host already has (e.g. `zpool/incus` on a Proxmox host). Nothing is created, wiped or destroyed |
 | `STORAGE_LOOP_SIZE` | With `STORAGE_DEVICE` empty: size of a loop-file ZFS pool (e.g. `700GiB`), for hosts whose only disk holds the OS. Incus creates it under `/var/lib/incus/disks` |
 | `OVN_ENCAP_IP` | This host's management IP: OVN Geneve tunnel endpoint and, once clustered, its cluster address |
 | `OVN_CENTRAL_ADDRESSES` | Clusters only: comma-separated `OVN_ENCAP_IP`s of the hosts that run the OVN databases (normally three), identical on every member (see [Clustering](#clustering)) |

@@ -115,7 +115,7 @@ storage_pools:
 - name: ${STORAGE_POOL}
   driver: zfs
   config:
-    $(host_storage_key): ${STORAGE_DEVICE:-${STORAGE_LOOP_SIZE}}
+    $(host_storage_key): $(host_storage_value)
 profiles:
 - name: default
   devices:
