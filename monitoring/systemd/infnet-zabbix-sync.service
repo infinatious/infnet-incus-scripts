@@ -1,0 +1,10 @@
+[Unit]
+Description=Sync Incus instances to Zabbix (hosts, port checks, Windows agent template)
+After=network-online.target incus.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kauffpc
+WorkingDirectory=/opt/infnet-incus-scripts
+ExecStart=/opt/infnet-incus-scripts/monitoring/sync-zabbix-hosts.sh

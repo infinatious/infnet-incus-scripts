@@ -635,7 +635,7 @@ Each site's `.env` holds its own server's `ZABBIX_*` values, written by `zabbix-
 | `create-instance.sh` | Host `<instance>` in group `Incus/<project>`, tagged `site`, `project`, `env`, `type` and `managed-by: infnet-incus-scripts`.<br>**ICMP Ping**, plus a **TCP check per port** the instance's ACL opens to the Zabbix server (trigger after 3 failures).<br>Linux instances also get **Linux by Zabbix agent active**. Their profile's cloud-init installs `zabbix-agent2`. |
 | `firewall-manager.sh` add/remove | The TCP checks follow the ACL |
 | `delete-instance.sh`, `delete-project.sh --delete-instances` | Host removed |
-| `monitoring/sync-zabbix-hosts.sh` (also `start.sh` → Misc) | Registers or updates every instance of this site, removes managed hosts whose instance is gone (`--no-prune` keeps them) |
+| `monitoring/sync-zabbix-hosts.sh` (also `start.sh` → Misc) | Registers or updates every instance of this site, removes managed hosts whose instance is gone (`--no-prune` keeps them). Runs hourly from `infnet-zabbix-sync.timer` (one member per cluster) |
 
 - **Server-side checks** (ping, TCP) run from the Zabbix server against the instance's **public IP**. Other projects' internal addresses aren't reachable, so instances without a public IP only get their agent.
   - Instances in the server's own project (`ZABBIX_PROJECT`) are checked on their internal IP, because of hairpin NAT.
@@ -645,7 +645,7 @@ Each site's `.env` holds its own server's `ZABBIX_*` values, written by `zabbix-
 - **Agents run active-only.** `monitoring/zabbix-agent-install.sh` sets `Server=` (nothing listens) and `ServerActive=<public IP>;<internal IP>`. The agent tries the second address when the first fails, which happens inside the server's own project.
   - Instances need no inbound rule.
   - The Zabbix server's ACL allows tcp/10051 from INFNET and both sites' public ranges.
-- **Windows:** the Zabbix agent isn't in the image; it's installed during post-install setup (`C:\INF\Install-ZabbixAgent.ps1`). Afterwards run `monitoring/sync-zabbix-hosts.sh`, which sees the "Zabbix Agent 2" service through the Incus agent and links "Windows by Zabbix agent active". VMs without the Incus agent (e.g. imported ones) get the template linked by hand. The scripts never unlink templates.
+- **Windows:** the Zabbix agent isn't in the image; it's installed during post-install setup (`C:\INF\Install-ZabbixAgent.ps1`). `monitoring/sync-zabbix-hosts.sh` (hourly from `infnet-zabbix-sync.timer`, or run it by hand) then sees the "Zabbix Agent 2" service through the Incus agent and links "Windows by Zabbix agent active". VMs without the Incus agent (e.g. imported ones) get the template linked by hand. The scripts never unlink templates.
 - **Alerts (Discord): only actual issues.** They go through the built-in Discord media type on the `Admin` user and the default "Report problems to Zabbix administrators" action, configured by `zabbix-configure.sh`:
   - Only **production** hosts: tag `env: p`, which the scripts set from the instance name's prefix; the built-in "Zabbix server" host is tagged too. QA, test and dev instances never alert.
   - Only severity **Average and up**: host unreachable, agent gone, a TCP port down. Warning-level problems (latency, "host restarted", swap) stay in the web UI.
@@ -669,6 +669,14 @@ DISCORD_WEBHOOK='https://discord.com/api/webhooks/…' ./monitoring/zabbix-confi
 ./deploy-project.sh --all-projects --update-payloads
 ./monitoring/install-zabbix-agent.sh --project-id 20 --instance pd20-dnsag-ct01   # per existing Linux instance
 ./monitoring/sync-zabbix-hosts.sh
+```
+
+Hourly sync, on one member per cluster (runs as `kauffpc`):
+
+```bash
+sudo cp monitoring/systemd/infnet-zabbix-sync.service monitoring/systemd/infnet-zabbix-sync.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now infnet-zabbix-sync.timer
 ```
 
 | `.env` | Meaning |

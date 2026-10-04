@@ -1,0 +1,10 @@
+[Unit]
+Description=Sync Incus instances to Zabbix hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
