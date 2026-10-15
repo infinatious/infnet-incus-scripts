@@ -49,6 +49,8 @@ source "${SCRIPT_DIR}/lib/public-ip.sh"
 source "${SCRIPT_DIR}/lib/firewall.sh"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/zabbix.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/ipv6.sh"
 
 PROJECT_ID_ARG=''
 DELETE_INSTANCES_ARG=''
@@ -175,6 +177,8 @@ if incus network show "${NETWORK_NAME}" --project "${PROJECT_NAME}" >/dev/null 2
   fi
   echo "Deleting network '${NETWORK_NAME}'..."
   run incus network delete "${NETWORK_NAME}" --project "${PROJECT_NAME}"
+  # The project's /64 is no longer announced to the router.
+  bgp_speaker_sync
 else
   echo "Network '${NETWORK_NAME}' not found, skipping."
 fi

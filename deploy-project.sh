@@ -42,7 +42,7 @@ fail() {
 
 usage() {
   cat <<'EOF'
-Usage: deploy-project.sh --project-name NAME --project-id ID
+Usage: deploy-project.sh --project-name NAME --project-id ID [--no-ipv6]
        deploy-project.sh --project-name NAME --add-missing-profiles
        deploy-project.sh --project-name NAME --update-payloads
        deploy-project.sh --project-name NAME --enable-ipv6
@@ -62,6 +62,9 @@ Options:
   --project-id ID         Numeric project ID from 2 to 253. It sets the network
                           subnet (<IPV4_SUBNET_PREFIX>.<id>.0/24) and the router /
                           default NAT address (<PROJECT_NAT_IPV4_PREFIX>.<id>).
+  --no-ipv6               Create the network IPv4-only even when .env enables IPv6
+                          (e.g. for the routing project that hosts the BGP
+                          speakers); --enable-ipv6 gives it IPv6 later.
   --add-missing-profiles  For an existing project, create whichever of the
                           three profiles it lacks and leave the rest alone.
   --all-projects          With --add-missing-profiles or --update-payloads:
@@ -272,12 +275,14 @@ enable_ipv6() {
   fi
   dns_register_project "${PROJECT_NAME}" "${want_address%/*}" || true
   local route
+  bgp_speaker_sync
   route="$(ipv6_route_note "${NETWORK_NAME}" "${PROJECT_NAME}")"
   [[ -z "${route}" ]] || echo "Upstream route: ${route}"
 }
 
 PROJECT_NAME=''
 PROJECT_ID=''
+NO_IPV6=''
 ENABLE_IPV6=''
 ADD_MISSING_PROFILES=''
 UPDATE_PAYLOADS=''
@@ -298,6 +303,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --enable-ipv6)
       ENABLE_IPV6='yes'
+      shift
+      ;;
+    --no-ipv6)
+      NO_IPV6='yes'
       shift
       ;;
     --project-name)
@@ -374,6 +383,7 @@ IPV4_ADDRESS="${IPV4_SUBNET_PREFIX}.${PROJECT_ID}.1/24"
 ROUTER_IPV4="${PROJECT_NAT_IPV4_PREFIX}.${PROJECT_ID}"
 ipv6_validate_prefix || exit 1
 mapfile -t IPV6_KEYS < <(ipv6_network_keys "${PROJECT_ID}")
+[[ -z "${NO_IPV6}" ]] || IPV6_KEYS=('ipv6.address=none')
 
 command -v incus >/dev/null 2>&1 || fail 'incus command not found in PATH.'
 [[ -f "${CLOUD_INIT_FILE}" ]] || fail "cloud-init file '${CLOUD_INIT_FILE}' not found."
@@ -454,7 +464,7 @@ run incus network create "${NETWORK_NAME}" \
 # domain to its instances, so <instance>.<project>.<zone> also resolves to
 # their internal address from inside the project.
 dns_register_project "${PROJECT_NAME}" "${IPV4_ADDRESS%/*}" || true
-ipv6_enabled && { dns_register_project "${PROJECT_NAME}" "$(ipv6_project_gateway "${PROJECT_ID}" | cut -d/ -f1)" || true; }
+[[ "${IPV6_KEYS[0]}" == 'ipv6.address=none' ]] || { dns_register_project "${PROJECT_NAME}" "$(ipv6_project_gateway "${PROJECT_ID}" | cut -d/ -f1)" || true; }
 
 run incus project set "${PROJECT_NAME}" restricted.networks.access="${NETWORK_NAME}"
 run incus project set "${PROJECT_NAME}" restricted.devices.nic=managed
@@ -470,7 +480,8 @@ echo
 echo 'Deployment complete.'
 echo "Project : ${PROJECT_NAME}"
 echo "Network : ${NETWORK_NAME} (${IPV4_ADDRESS}, NAT ${ROUTER_IPV4})"
-if ipv6_enabled; then
+if [[ "${IPV6_KEYS[0]}" != 'ipv6.address=none' ]]; then
+  bgp_speaker_sync
   echo "IPv6    : $(ipv6_project_gateway "${PROJECT_ID}") ($([[ "${IPV6_NAT:-false}" == 'true' ]] && echo 'NAT66' || echo 'routed'))"
   UPSTREAM_ROUTE="$(ipv6_route_note "${NETWORK_NAME}" "${PROJECT_NAME}")"
   [[ -z "${UPSTREAM_ROUTE}" ]] || echo "Route   : ${UPSTREAM_ROUTE}"

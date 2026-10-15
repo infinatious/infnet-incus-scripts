@@ -116,13 +116,30 @@ ipv6_check_uplink() {
   fi
 }
 
-# One line for the summaries: what the upstream router needs to reach a routed
-# project network (nothing for NAT66 or IPv4-only). Incus 7.5 does not announce
-# OVN project subnets over BGP, so the route has to exist on the router (a
-# static route, or a BGP speaker of our own).
+# True when BGP speaker instances announce the project networks (BGP_SPEAKERS).
+bgp_speakers_enabled() { [[ -n "${BGP_SPEAKERS:-}" ]]; }
+
+# Re-announces the routed project networks through the BGP speakers, if any.
+# Best effort: a failure is only a warning, host/bgp-speaker.sh sync repeats it.
+bgp_speaker_sync() {
+  bgp_speakers_enabled || return 0
+  ipv6_routed || return 0
+  "${ROOT_DIR:-${SCRIPT_DIR}}/host/bgp-speaker.sh" sync </dev/null \
+    || echo "Warning: updating the BGP speakers failed; run host/bgp-speaker.sh sync." >&2
+  return 0
+}
+
+# One line for the summaries: how the upstream router reaches a routed project
+# network (nothing for NAT66 or IPv4-only). Incus 7.5 does not announce OVN
+# project subnets over BGP, so the speakers (host/bgp-speaker.sh) do, or the
+# route has to exist on the router as a static route.
 ipv6_route_note() {
   local network="$1" project="$2" route
   ipv6_routed || return 0
+  if bgp_speakers_enabled; then
+    echo "announced to ${BGP_PEER_ADDRESS:-the router} by the BGP speakers, nothing to add upstream"
+    return 0
+  fi
   route="$(ipv6_upstream_route "${network}" "${project}")"
   [[ -z "${route}" ]] || echo "the upstream router needs: ${route}"
 }
