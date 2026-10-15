@@ -633,3 +633,5 @@ if technitium_configured; then
   [[ -n "${INSTANCE_IPV6}" ]] && echo "DNS         : ${DNS_INTERNAL_FQDN} -> ${INSTANCE_IPV6}"
   [[ -n "${INSTANCE_IPV6}" && -n "${PUBLIC_IPV4}" ]] && ipv6_routed && echo "DNS         : ${DNS_FQDN} -> ${INSTANCE_IPV6}"
 fi
+# A failed "[[ ... ]] && echo" above must not become the script's exit status.
+exit 0
