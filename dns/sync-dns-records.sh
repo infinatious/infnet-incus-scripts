@@ -10,6 +10,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${ROOT_DIR}/.env"
 DNS_LIB_FILE="${SCRIPT_DIR}/technitium-dns.sh"
+IPV6_LIB_FILE="${ROOT_DIR}/lib/ipv6.sh"
 
 fail() {
   echo "Error: $*" >&2
@@ -18,24 +19,29 @@ fail() {
 
 usage() {
   cat <<'EOF'
-Usage: sync-dns-records.sh [--dry-run]
+Usage: sync-dns-records.sh [--dry-run] [--project NAME]...
 
 Makes sure Technitium matches every instance in every project:
   <instance>.<zone>             -> its 1:1 NAT public IP (user.public_ipv4),
-                                   for instances that have one
-  <instance>.<project>.<zone>   -> its internal address (10.x.x.y), for all
+                                   for instances that have one; with routed
+                                   IPv6 (IPV6_SUBNET_PREFIX, IPV6_NAT=false)
+                                   also an AAAA record with its global address
+  <instance>.<project>.<zone>   -> its internal address (10.x.x.y), for all;
+                                   plus an AAAA record when it has IPv6
 and for every managed project (described "Project ID: N"):
-  <project>.<zone>              -> the project network's gateway (10.x.x.1);
-                                   another site's gateway for a project of the
-                                   same name is left alone
+  <project>.<zone>              -> the project network's gateway (10.x.x.1,
+                                   and its IPv6 gateway when the network has
+                                   one); another site's gateway for a project
+                                   of the same name is left alone
 plus the network's DNS domain set to <project>.<zone>. Missing records are
 created and records pointing at a stale address are corrected; records that
 already match are left untouched. On a cluster, run this from any
 one member - it covers every member, unlike backup-instances.sh.
 
 Options:
-  --dry-run   Report what would change without writing to Technitium.
-  --help      Show this help message.
+  --dry-run       Report what would change without writing to Technitium.
+  --project NAME  Only this project (repeat for more) instead of all of them.
+  --help          Show this help message.
 EOF
 }
 
@@ -49,13 +55,22 @@ source "${ENV_FILE}"
 [[ -f "${DNS_LIB_FILE}" ]] || fail "${DNS_LIB_FILE} not found."
 # shellcheck source=/dev/null
 source "${DNS_LIB_FILE}"
+[[ -f "${IPV6_LIB_FILE}" ]] || fail "${IPV6_LIB_FILE} not found."
+# shellcheck source=/dev/null
+source "${IPV6_LIB_FILE}"
 
 DRY_RUN=''
+ONLY_PROJECTS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)
       DRY_RUN='yes'
       shift
+      ;;
+    --project)
+      [[ $# -ge 2 ]] || fail 'missing value for --project.'
+      ONLY_PROJECTS+=("$2")
+      shift 2
       ;;
     --help|-h)
       usage
@@ -75,6 +90,12 @@ technitium_configured || fail 'Technitium is not configured in .env (TECHNITIUM_
 
 mapfile -t PROJECT_NAMES < <(incus project list -f json 2>/dev/null | jq -r '.[].name' || true)
 (( ${#PROJECT_NAMES[@]} > 0 )) || fail 'no projects found.'
+if (( ${#ONLY_PROJECTS[@]} > 0 )); then
+  for name in "${ONLY_PROJECTS[@]}"; do
+    printf '%s\n' "${PROJECT_NAMES[@]}" | grep -qxF "${name}" || fail "no project named '${name}'."
+  done
+  PROJECT_NAMES=("${ONLY_PROJECTS[@]}")
+fi
 
 CREATED=0
 UPDATED=0
@@ -82,20 +103,22 @@ UNCHANGED=0
 SKIPPED=0
 
 # Makes one name point at an address: "replace" for instance names (one
-# address each), "add" for project names (each site adds its own gateway).
+# address per family), "add" for project names (each site adds its own
+# gateway). The address's family (A or AAAA) decides which records are compared.
 sync_record() {
-  local fqdn="$1" ip="$2" mode="$3" label="$4" existing
-  existing="$(dns_lookup_record_ips "${fqdn}" || true)"
+  local fqdn="$1" ip="$2" mode="$3" label="$4" existing type
+  type="$(dns_record_type "${ip}")"
+  existing="$(dns_lookup_record_ips "${fqdn}" "${type}" || true)"
   if grep -qxF "${ip}" <<< "${existing}" && { [[ "${mode}" == 'add' ]] || [[ "$(grep -c . <<< "${existing}")" == 1 ]]; }; then
     echo "OK       '${fqdn}' -> '${ip}' (${label})."
     UNCHANGED=$((UNCHANGED + 1))
     return 0
   fi
   if [[ -n "${existing}" && "${mode}" == 'replace' ]]; then
-    echo "Drifted  '${fqdn}': '$(paste -sd, <<< "${existing}")' -> '${ip}' (${label})."
+    echo "Drifted  '${fqdn}': '$(paste -sd, <<< "${existing}")' -> '${ip}' (${label}, ${type})."
     UPDATED=$((UPDATED + 1))
   else
-    echo "Missing  '${fqdn}' -> '${ip}' (${label})."
+    echo "Missing  '${fqdn}' -> '${ip}' (${label}, ${type})."
     CREATED=$((CREATED + 1))
   fi
   [[ "${DRY_RUN}" == 'yes' ]] || dns_register_record "${fqdn}" "${ip}" "${mode}" || true
@@ -110,6 +133,9 @@ for PROJECT_NAME in "${PROJECT_NAMES[@]}"; do
     GATEWAY_IPV4="$(incus network get "${PROJECT_NAME}" ipv4.address --project "${PROJECT_NAME}" 2>/dev/null)"
     [[ -n "${GATEWAY_IPV4}" && "${GATEWAY_IPV4}" != 'none' ]] \
       && sync_record "$(dns_project_name "${PROJECT_NAME}")" "${GATEWAY_IPV4%/*}" add "gateway of project '${PROJECT_NAME}'"
+    GATEWAY_IPV6="$(incus network get "${PROJECT_NAME}" ipv6.address --project "${PROJECT_NAME}" 2>/dev/null)"
+    [[ -n "${GATEWAY_IPV6}" && "${GATEWAY_IPV6}" != 'none' ]] \
+      && sync_record "$(dns_project_name "${PROJECT_NAME}")" "${GATEWAY_IPV6%/*}" add "IPv6 gateway of project '${PROJECT_NAME}'"
     WANT_DOMAIN="$(dns_project_name "${PROJECT_NAME}")"
     HAVE_DOMAIN="$(incus network get "${PROJECT_NAME}" dns.domain --project "${PROJECT_NAME}" 2>/dev/null)"
     if [[ "${HAVE_DOMAIN}" != "${WANT_DOMAIN}" ]]; then
@@ -126,13 +152,25 @@ for PROJECT_NAME in "${PROJECT_NAMES[@]}"; do
 
     PUBLIC_IP="$(incus config get "${INSTANCE_NAME}" user.public_ipv4 --project "${PROJECT_NAME}" 2>/dev/null || true)"
     INTERNAL_IP="$(instance_internal_ipv4 "${INSTANCE_NAME}" "${PROJECT_NAME}")"
+    INTERNAL_IPV6=''
+    # Only networks that have IPv6 hand out addresses, so only they are asked.
+    if [[ "$(incus network get "${PROJECT_NAME}" ipv6.address --project "${PROJECT_NAME}" 2>/dev/null)" =~ : ]]; then
+      INTERNAL_IPV6="$(instance_internal_ipv6 "${INSTANCE_NAME}" "${PROJECT_NAME}")"
+    fi
     if [[ -n "${PUBLIC_IP}" ]]; then
       sync_record "$(dns_public_name "${INSTANCE_NAME}")" "${PUBLIC_IP}" replace "public, project '${PROJECT_NAME}'"
+      # Routed IPv6 has no NAT: the instance's own global address is its public one.
+      if [[ -n "${INTERNAL_IPV6}" ]] && ipv6_routed; then
+        sync_record "$(dns_public_name "${INSTANCE_NAME}")" "${INTERNAL_IPV6}" replace "public IPv6, project '${PROJECT_NAME}'"
+      fi
     fi
     if [[ -n "${INTERNAL_IP}" ]]; then
       sync_record "$(dns_internal_name "${INSTANCE_NAME}" "${PROJECT_NAME}")" "${INTERNAL_IP}" replace "internal, project '${PROJECT_NAME}'"
     fi
-    [[ -n "${PUBLIC_IP}${INTERNAL_IP}" ]] || SKIPPED=$((SKIPPED + 1))
+    if [[ -n "${INTERNAL_IPV6}" ]]; then
+      sync_record "$(dns_internal_name "${INSTANCE_NAME}" "${PROJECT_NAME}")" "${INTERNAL_IPV6}" replace "internal IPv6, project '${PROJECT_NAME}'"
+    fi
+    [[ -n "${PUBLIC_IP}${INTERNAL_IP}${INTERNAL_IPV6}" ]] || SKIPPED=$((SKIPPED + 1))
   done
 done
 

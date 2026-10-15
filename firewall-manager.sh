@@ -25,7 +25,10 @@ Actions:
                             range or list for tcp/udp, e.g. tcp:443,
                             udp:27015-27030, both:53.
     --source CIDR[,CIDR]    Only from these addresses (default: anywhere).
-                            "infnet" means 10.100.0.0/16.
+                            "infnet" means 10.100.0.0/16 (plus INFNET_IPV6_CIDRS
+                            from .env). A rule with a source only matches that
+                            family: use IPv4 and IPv6 sources together for
+                            both. Without --source a rule covers IPv4 and IPv6.
     --description TEXT      Rule description (default: the protocol and ports).
   --remove N                Remove inbound rule number N (as shown by --list).
 
@@ -47,6 +50,8 @@ INFNET_CIDR='10.100.0.0/16'
 if [[ -f "${SCRIPT_DIR}/.env" ]]; then
   # shellcheck source=/dev/null
   source "${SCRIPT_DIR}/.env"
+  # "infnet" also covers the site's IPv6 ranges, when .env lists them.
+  [[ -z "${INFNET_IPV6_CIDRS:-}" ]] || INFNET_CIDR="${INFNET_CIDR},${INFNET_IPV6_CIDRS}"
   # shellcheck source=/dev/null
   source "${SCRIPT_DIR}/lib/zabbix.sh"
 fi

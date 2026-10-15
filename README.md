@@ -331,7 +331,52 @@ The NIC keys the scripts set are `security.acls=<instance>`, `security.acls.defa
 ./firewall-manager.sh --project-id 23 --instance pd23-mcrft-ct01 --remove 6
 ```
 
-It edits the instance's own ACL. `--add` takes `tcp`, `udp`, `both` (one rule each), `icmp4` or `icmp6`, with ports as a number, range or list (`tcp:8000-8100`, `udp:53,123`). `--source` limits a rule to CIDRs, and `infnet` means `10.100.0.0/16`. `--remove N` uses the numbers `--list` shows. Changes apply immediately. The interactive menu asks before removing the SSH/RDP rule, and the script warns if the ACL isn't attached to the instance's NIC.
+It edits the instance's own ACL. `--add` takes `tcp`, `udp`, `both` (one rule each), `icmp4` or `icmp6`, with ports as a number, range or list (`tcp:8000-8100`, `udp:53,123`). `--source` limits a rule to CIDRs (a rule without one covers IPv4 and IPv6; with one, only that family), and `infnet` means `10.100.0.0/16` plus `INFNET_IPV6_CIDRS`. `--remove N` uses the numbers `--list` shows. Changes apply immediately. The interactive menu asks before removing the SSH/RDP rule, and the script warns if the ACL isn't attached to the instance's NIC.
+
+## IPv6 (dual-stack)
+
+IPv6 is optional and off until `IPV6_SUBNET_PREFIX` is set in `.env`; without it every project network stays IPv4-only exactly as before. With it, project networks are dual-stack: instances keep their IPv4 setup (private address, optional 1:1 NAT) and also get an IPv6 address by SLAAC from the network's router advertisements. Nothing is configured inside the guests, Linux and Windows alike.
+
+| Setting (`.env`) | Meaning |
+|---|---|
+| `UPLINK_IPV6_GATEWAY`, `UPLINK_IPV6_OVN_RANGES`, `UPLINK_IPV6_ROUTES` | The uplink's own IPv6 side: the upstream router's address on the uplink `/64` (with prefix length), a range on that `/64` for the OVN routers' uplink ports (one per project network), optional extra prefixes. `UPLINK_DNS_NAMESERVERS` may mix IPv4 and IPv6 resolvers; the IPv6 ones also reach instances as RDNSS. |
+| `IPV6_SUBNET_PREFIX` | The prefix (no longer than `/56`) project networks are carved from. A project's `/64` is this prefix plus the project ID as the subnet number, in hex: ID 24 of `2001:db8:1200::/48` is `2001:db8:1200:18::/64`. |
+| `IPV6_NAT` | `false` (default): **routed**, instances get global addresses. `true`: **NAT66**, for a ULA prefix (`fd00::/8`): instances reach out through the router's uplink address and nothing is routed in. |
+| `IPV6_INTERNAL_CIDRS` | Who may reach an instance made with `--no-public-ip` (default: `IPV6_SUBNET_PREFIX` and `fe80::/10`). |
+| `INFNET_IPV6_CIDRS` | Added to `10.100.0.0/16` for the `infnet` source alias in `firewall-manager.sh`. |
+| `NPM_DNS_TARGET_IPV6` | NPM's IPv6 address; `npm-proxy-host.sh` then writes an AAAA next to each A record. |
+
+### Turning it on, in this order
+
+Instances use IPv6 as soon as their network has a prefix, so the upstream has to work first. Enabling the prefix before the upstream routes it black-holes IPv6: connections to dual-stack sites stall until they time out and fall back to IPv4.
+
+1. **Upstream.** Get the prefix routed to the site and a `/64` on the uplink segment (the upstream router's address on it is `UPLINK_IPV6_GATEWAY`). Check that the hosts' uplink NIC gets a global address by router advertisement.
+2. **Uplink.** Fill in the `UPLINK_IPV6_*`, `IPV6_SUBNET_PREFIX` and `IPV6_NAT` settings, then run `host/uplink-ipv6.sh` (`--dry-run` first) on one member. New hosts get the same from `host/setup-incus-host.sh`. For a routed prefix the script also adds it to the uplink's `ipv6.routes`: Incus refuses a routed (`ipv6.nat=false`) network whose subnet is not inside them.
+3. **Routes upstream (routed mode).** The prefix is not on-link, so the upstream router needs one route per project: the project's `/64` via its OVN router's address on the uplink (an address from `UPLINK_IPV6_OVN_RANGES`). `deploy-project.sh` prints it (`Route: the upstream router needs: 2001:db8:1200:18::/64 via 2001:db8:ff:1::10`). BGP on the uplink would avoid the per-project routes; the scripts don't set that up.
+4. **Projects.** New ones get IPv6 from `deploy-project.sh`. Existing ones: `./deploy-project.sh --all-projects --enable-ipv6` (or `--project-name NAME`). Running instances pick the prefix up from the next router advertisement, no restart. It is safe to repeat.
+5. **DNS.** `dns/sync-dns-records.sh` adds the AAAA records of running instances.
+
+Do 4 one project at a time at first. Taking IPv6 away again is `incus network set <project> ipv6.address=none --project <project>`.
+
+### Firewall and exposure
+
+Routed IPv6 has no NAT, so every instance is reachable from the internet at its own address. What stands in the way is the instance's [firewall ACL](#firewall), which already covers both families: inbound is rejected except ICMP, ICMPv6 and SSH/RDP, and anything added with `firewall-manager.sh` without a `--source` applies to IPv4 and IPv6 alike.
+
+Instances without a public IPv4 (`--no-public-ip`) are meant to be private, so with routed IPv6 their ACL is created narrower: the IPv4 rules carry the source `0.0.0.0/0` (IPv4 only, as before) and their IPv6 twins only admit `IPV6_INTERNAL_CIDRS`. `--enable-ipv6` applies the same to existing instances without a public IP (only their untouched default SSH/RDP/ICMPv6 rules; hand-made rules stay) before it gives the network a prefix, and stops without enabling IPv6 if that fails. A source in a rule limits it to that family, so a custom rule for both families lists an IPv4 and an IPv6 source (`--source infnet` does, when `INFNET_IPV6_CIDRS` is set).
+
+### DNS
+
+AAAA records follow the A ones: `<instance>.<project>.infnet` gets the instance's address, `<project>.infnet` its network's IPv6 gateway and, with routed IPv6, `<instance>.infnet` (public IPv4 instances only) also gets the instance's global address. When an instance has several, the address derived from its MAC is the one published, so privacy addresses are not. Replacing one family never touches the other.
+
+Technitium listens on IPv6 by default; give the DNS servers AAAA records and add their IPv6 addresses to `UPLINK_DNS_NAMESERVERS` once they have them.
+
+### Not covered
+
+- Public 1:1 mappings for IPv6 (network forwards) in NAT66 mode, and BGP.
+- Docker-in-instance IPv6 (Docker's own networks stay IPv4).
+- Zabbix agents keep talking IPv4.
+- The `default` project's network stays IPv4-only.
+
 
 ## Authentik SSO
 
@@ -443,8 +488,8 @@ sudo ./branding/uefi-logo.sh revert   # back to the stock firmware
 
 | Category | Tasks |
 |---|---|
-| 1) Project Manager | deploy a project; delete an empty project; delete a project with all its instances (`--delete-instances`); add missing profiles to one project or to all projects; update profile payloads in all projects |
-| 2) Host Tasks | cluster health report; check for Incus upgrades; rolling upgrade of all members (see [Upgrading Incus](#upgrading-incus)); re-run host setup (`sudo`, never wipes the disk from the menu); re-apply web UI branding (`sudo`); UEFI boot logo status |
+| 1) Project Manager | deploy a project; delete an empty project; delete a project with all its instances (`--delete-instances`); add missing profiles to one project or to all projects; update profile payloads in all projects; enable IPv6 on all projects |
+| 2) Host Tasks | cluster health report; check for Incus upgrades; set up IPv6 on the uplink (dry run or for real); rolling upgrade of all members (see [Upgrading Incus](#upgrading-incus)); re-run host setup (`sudo`, never wipes the disk from the menu); re-apply web UI branding (`sudo`); UEFI boot logo status |
 | 3) Instance Manager | create, resize, delete an instance; manage an instance's firewall (open/close ports) |
 | 4) Backup Manager | back up now, dry run, restore an instance |
 | 5) Misc | sync DNS records (and dry run), manage images and aliases |
@@ -460,7 +505,8 @@ sudo ./branding/uefi-logo.sh revert   # back to the stock firmware
 - `backup/backup-instances.sh` exports instances to NFS. Runs nightly from `infnet-incus-backup.timer`.
 - `backup/restore-instance.sh` restores an instance, including its 1:1 NAT.
 - `dns/sync-dns-records.sh` creates or corrects the Technitium records of every instance and project.
-- `lib/public-ip.sh` and `dns/technitium-dns.sh` are shared helpers, sourced by the scripts above.
+- `lib/public-ip.sh`, `lib/ipv6.sh`, `lib/firewall.sh` and `dns/technitium-dns.sh` are shared helpers, sourced by the scripts above.
+- `host/uplink-ipv6.sh` gives an existing uplink its IPv6 side ([IPv6](#ipv6-dual-stack)).
 - `host/setup-incus-host.sh` builds the host ([Host setup](#host-setup)); `host/cluster-enable.sh` and `host/cluster-join.sh` grow it into a cluster ([Clustering](#clustering)); `host/common.sh` holds their shared steps; `branding/apply-ui-branding.sh` brands the UI.
 
 `.env` stays at the repository root and is shared by every script. All scripts accept command-line arguments and fall back to interactive prompts for anything omitted.
@@ -471,7 +517,7 @@ sudo ./branding/uefi-logo.sh revert   # back to the stock firmware
 ./deploy-project.sh --project-name demo --project-id 42
 ```
 
-Creates the project (description `Project ID: 42`, which the other scripts use to find it), an OVN network `demo` on `<IPV4_SUBNET_PREFIX>.42.1/24` behind `UPLINK_NETWORK`, and the profiles `demo-linux` (1 CPU, 2 GiB, 20 GiB, cloud-init from `cloud-init-user-data.yaml`) `demo-win` (2 CPU, 4 GiB, 64 GiB, cloudbase-init from `cloudbase-init-user-data.yaml`) and `demo-linux-docker` (see [Docker profile](#docker-profile)). It warns if the uplink has no `ipv4.routes`, since instances in the project couldn't get public IPs.
+Creates the project (description `Project ID: 42`, which the other scripts use to find it), an OVN network `demo` on `<IPV4_SUBNET_PREFIX>.42.1/24` behind `UPLINK_NETWORK`, and the profiles `demo-linux` (1 CPU, 2 GiB, 20 GiB, cloud-init from `cloud-init-user-data.yaml`) `demo-win` (2 CPU, 4 GiB, 64 GiB, cloudbase-init from `cloudbase-init-user-data.yaml`) and `demo-linux-docker` (see [Docker profile](#docker-profile)). It warns if the uplink has no `ipv4.routes`, since instances in the project couldn't get public IPs. With `IPV6_SUBNET_PREFIX` set the network is dual-stack too ([IPv6](#ipv6-dual-stack)); `--enable-ipv6` does that for an existing project.
 
 New Linux instances take their timezone from the profile's cloud-init. Set `INSTANCE_TIMEZONE` in each site's `.env` (us-west `America/Phoenix`, us-east `America/Detroit`). Without it, the zone in `cloud-init-user-data.yaml` applies. After changing it, run `./deploy-project.sh --all-projects --update-payloads`; that only affects instances created afterwards.
 
@@ -576,6 +622,8 @@ All records go into the one Technitium zone (`TECHNITIUM_ZONE`, default `infnet`
 | `<instance>.<project>.infnet` | the instance's **internal** address (`10.x.x.y`); every instance, public IP or not | `create-instance.sh` once the address is known (removed by the same delete scripts) |
 | `<project>.infnet` | the project network's gateway, `<IPV4_SUBNET_PREFIX>.<id>.1` | `deploy-project.sh` (removed by `delete-project.sh`) |
 
+With [IPv6](#ipv6-dual-stack) on, `<instance>.<project>.infnet` and `<project>.infnet` also get AAAA records, and `<instance>.infnet` the instance's global address when it has a public IPv4 (routed mode).
+
 Instance names are unique across sites. Project names aren't (both sites have `infra-dns` and `infra-edge`), so each site only adds or removes its own gateway address in `<project>.infnet`, which then lists both. `deploy-project.sh` also sets the OVN network's `dns.domain` to `<project>.infnet`, so new instances' OVN-internal names are `<instance>.<project>.infnet`. Existing instances keep their old internal name (`<instance>.incus`) until restarted.
 
 Instances can only resolve these names if their DNS server knows the `infnet` zone: the uplink's `dns.nameservers` must point at a Technitium server that hosts it (or a secondary/forwarder of it).
@@ -585,9 +633,10 @@ Instances can only resolve these names if their DNS server knows the `infnet` zo
 ```bash
 ./dns/sync-dns-records.sh --dry-run
 ./dns/sync-dns-records.sh
+./dns/sync-dns-records.sh --project app-tools
 ```
 
-Audits every instance in every project and creates or corrects its Technitium A record so it points at the instance's public IP. Instances without a public IP are skipped.
+Audits every instance in every project and project network and creates or corrects the records listed under [DNS names](#dns-names): A records (public and internal) and, where the network has IPv6, AAAA records. Records that already match are left alone.
 
 #### `backup-instances.sh`
 
@@ -725,7 +774,7 @@ Without `ZABBIX_*` in `.env` everything Zabbix-related is skipped with a warning
 
 ## DNS registration
 
-`create-instance.sh`, `delete-instance.sh` and `delete-project.sh` register and remove an A record in [Technitium DNS](https://technitium.com/dns/) for each instance, pointing `<instance-name>.<zone>` (e.g. `p42-tstng-ct01.infnet`) at the instance's public 1:1 NAT address, not its internal OVN address. This is driven by `dns/technitium-dns.sh`, a small shared helper.
+`create-instance.sh`, `delete-instance.sh` and `delete-project.sh` register and remove A (and, with [IPv6](#ipv6-dual-stack), AAAA) records in [Technitium DNS](https://technitium.com/dns/) for each instance, pointing `<instance-name>.<zone>` (e.g. `p42-tstng-ct01.infnet`) at the instance's public 1:1 NAT address, not its internal OVN address. This is driven by `dns/technitium-dns.sh`, a small shared helper.
 
 DNS registration is best-effort and non-blocking: if Technitium is unreachable or misconfigured, the script prints a warning and continues.
 

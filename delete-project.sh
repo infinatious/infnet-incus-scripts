@@ -169,6 +169,10 @@ if incus network show "${NETWORK_NAME}" --project "${PROJECT_NAME}" >/dev/null 2
   if [[ -n "${GATEWAY_IPV4}" && "${GATEWAY_IPV4}" != 'none' ]]; then
     dns_deregister_project "${PROJECT_NAME}" "${GATEWAY_IPV4%/*}" || true
   fi
+  GATEWAY_IPV6="$(incus network get "${NETWORK_NAME}" ipv6.address --project "${PROJECT_NAME}" 2>/dev/null)"
+  if [[ "${GATEWAY_IPV6}" == *:* ]]; then
+    dns_deregister_project "${PROJECT_NAME}" "${GATEWAY_IPV6%/*}" || true
+  fi
   echo "Deleting network '${NETWORK_NAME}'..."
   run incus network delete "${NETWORK_NAME}" --project "${PROJECT_NAME}"
 else

@@ -77,6 +77,9 @@ source "${NAT_LIB_FILE}"
 source "${SCRIPT_DIR}/lib/firewall.sh"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/zabbix.sh"
+[[ -f "${SCRIPT_DIR}/lib/ipv6.sh" ]] || fail "${SCRIPT_DIR}/lib/ipv6.sh not found."
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/ipv6.sh"
 
 ARGS_PROVIDED=$#
 
@@ -480,7 +483,14 @@ remove_new_instance() {
 
 read -r FW_PORT FW_SERVICE <<< "$(fw_default_rule "${PROFILE_FAMILY}")"
 echo "Creating firewall ACL '${INSTANCE_NAME}': inbound ICMP and ${FW_SERVICE} (tcp/${FW_PORT}) only, outbound open..."
-fw_create_acl "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PROFILE_FAMILY}" \
+# Routed IPv6 gives every instance a global address; one without a public IPv4
+# is meant to stay private, so its IPv6 rules admit internal sources only.
+FW_SCOPE='public'
+if ipv6_routed && [[ -z "${PUBLIC_IPV4}" ]]; then
+  FW_SCOPE='internal'
+  echo "No public IPv4: its IPv6 rules admit only $(ipv6_internal_cidrs)."
+fi
+fw_create_acl "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PROFILE_FAMILY}" "${FW_SCOPE}" \
   || { remove_new_instance; fail "unable to create firewall ACL '${INSTANCE_NAME}'; the instance was removed."; }
 mapfile -t FW_NIC_KEYS < <(fw_nic_keys "${INSTANCE_NAME}")
 
@@ -539,6 +549,30 @@ else
   echo "Internal address unknown, so '${DNS_INTERNAL_FQDN}' isn't registered yet; dns/sync-dns-records.sh adds it later."
 fi
 
+# IPv6: SLAAC from the project network's router advertisements, so there is
+# nothing to configure; wait for the address the guest (or OVN) reports and add
+# the AAAA records next to the A ones. Routed IPv6 has no NAT, so the global
+# address also becomes the AAAA of the public name.
+INSTANCE_IPV6=''
+if ipv6_enabled && [[ -z "${EMPTY_ARG}" ]]; then
+  if [[ "$(incus network get "${NETWORK_NAME}" ipv6.address --project "${PROJECT_NAME}" 2>/dev/null)" =~ : ]]; then
+    echo 'Waiting for IPv6 address...'
+    for _ in $(seq 1 30); do
+      INSTANCE_IPV6="$(instance_internal_ipv6 "${INSTANCE_NAME}" "${PROJECT_NAME}" "${PUBLIC_IP_NIC}")"
+      [[ -n "${INSTANCE_IPV6}" ]] && break
+      sleep 2
+    done
+    if [[ -n "${INSTANCE_IPV6}" ]]; then
+      dns_register_internal "${INSTANCE_NAME}" "${PROJECT_NAME}" "${INSTANCE_IPV6}" || true
+      if [[ -n "${PUBLIC_IPV4}" ]] && ipv6_routed; then
+        dns_register_public "${INSTANCE_NAME}" "${INSTANCE_IPV6}" || true
+      fi
+    else
+      echo "No IPv6 address reported yet, so no AAAA records; dns/sync-dns-records.sh adds them later."
+    fi
+  fi
+fi
+
 # Monitoring: register the host in Zabbix. An --empty VM stays stopped until
 # its disk is imported and would only raise "unreachable" alerts until then,
 # so it's registered by monitoring/sync-zabbix-hosts.sh after it's started.
@@ -589,10 +623,13 @@ echo "CPU         : ${CPU_CORES}"
 echo "RAM         : ${RAM_GIB}GiB"
 echo "Boot disk   : ${DISK_GIB}GiB"
 echo "Instance IP : ${INSTANCE_IPV4}"
+ipv6_enabled && echo "IPv6        : ${INSTANCE_IPV6:-none yet}$([[ -n "${INSTANCE_IPV6}" ]] && { ipv6_routed && echo ' (global, routed)' || echo ' (NAT66)'; })"
 echo "Public IP   : ${PUBLIC_IPV4:-none}${PUBLIC_IPV4:+ (1:1 NAT)}"
-echo "Firewall    : ACL '${INSTANCE_NAME}' - inbound ICMP and ${FW_SERVICE} (tcp/${FW_PORT}) only"
+echo "Firewall    : ACL '${INSTANCE_NAME}' - inbound ICMP and ${FW_SERVICE} (tcp/${FW_PORT}) only$([[ "${FW_SCOPE}" == 'internal' ]] && echo ', IPv6 from internal sources only')"
 echo "Description : ${DESCRIPTION_TEXT}"
 if technitium_configured; then
   [[ -n "${PUBLIC_IPV4}" ]] && echo "DNS         : ${DNS_FQDN} -> ${PUBLIC_IPV4}"
   [[ "${INSTANCE_IPV4}" != 'unknown' ]] && echo "DNS         : ${DNS_INTERNAL_FQDN} -> ${INSTANCE_IPV4}"
+  [[ -n "${INSTANCE_IPV6}" ]] && echo "DNS         : ${DNS_INTERNAL_FQDN} -> ${INSTANCE_IPV6}"
+  [[ -n "${INSTANCE_IPV6}" && -n "${PUBLIC_IPV4}" ]] && ipv6_routed && echo "DNS         : ${DNS_FQDN} -> ${INSTANCE_IPV6}"
 fi

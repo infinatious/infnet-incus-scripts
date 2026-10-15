@@ -50,6 +50,8 @@ done
 source "${ENV_FILE}"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/common.sh"
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/ipv6.sh"
 
 : "${INCUS_CHANNEL:?INCUS_CHANNEL not set in ${ENV_FILE}}"
 : "${INCUS_ADMIN_USER:?INCUS_ADMIN_USER not set in ${ENV_FILE}}"
@@ -85,6 +87,14 @@ SOUTHBOUND="$(ovs-vsctl --if-exists get open_vswitch . external_ids:ovn-remote 2
 host_configure_ovn_chassis "${SOUTHBOUND}" "${OVN_ENCAP_IP}"
 host_add_admin_user
 
+# Optional IPv6 on the uplink (see lib/ipv6.sh); indented for the preseed below.
+UPLINK_IPV6_LINES=''
+if [[ -n "${UPLINK_IPV6_GATEWAY:-}" ]]; then
+  : "${UPLINK_IPV6_OVN_RANGES:?UPLINK_IPV6_OVN_RANGES must be set with UPLINK_IPV6_GATEWAY in ${ENV_FILE}}"
+  UPLINK_IPV6_LINES=$'\n'"    ipv6.gateway: ${UPLINK_IPV6_GATEWAY}"$'\n'"    ipv6.ovn.ranges: ${UPLINK_IPV6_OVN_RANGES}"
+  [[ -z "$(ipv6_uplink_routes)" ]] || UPLINK_IPV6_LINES+=$'\n'"    ipv6.routes: $(ipv6_uplink_routes)"
+fi
+
 if [[ "$(incus storage list -f json | jq 'length')" == '0' ]]; then
   host_prepare_storage_device "${WIPE_STORAGE_DEVICE}"
 
@@ -101,7 +111,7 @@ networks:
     ipv4.gateway: ${UPLINK_IPV4_GATEWAY}
     ipv4.ovn.ranges: ${UPLINK_IPV4_OVN_RANGES}
     ipv4.routes: ${UPLINK_IPV4_ROUTES}
-    dns.nameservers: ${UPLINK_DNS_NAMESERVERS}
+    dns.nameservers: ${UPLINK_DNS_NAMESERVERS}${UPLINK_IPV6_LINES}
 - name: default
   type: ovn
   description: Default OVN network

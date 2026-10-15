@@ -24,6 +24,11 @@ source "${SCRIPT_DIR}/lib/public-ip.sh"
 [[ -f "${SCRIPT_DIR}/dns/technitium-dns.sh" ]] || { echo "Error: ${SCRIPT_DIR}/dns/technitium-dns.sh not found." >&2; exit 1; }
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/dns/technitium-dns.sh"
+[[ -f "${SCRIPT_DIR}/lib/ipv6.sh" ]] || { echo "Error: ${SCRIPT_DIR}/lib/ipv6.sh not found." >&2; exit 1; }
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/ipv6.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/firewall.sh"
 
 : "${UPLINK_NETWORK:?UPLINK_NETWORK not set in ${ENV_FILE}}"
 : "${IPV4_SUBNET_PREFIX:?IPV4_SUBNET_PREFIX not set in ${ENV_FILE}}"
@@ -40,11 +45,17 @@ usage() {
 Usage: deploy-project.sh --project-name NAME --project-id ID
        deploy-project.sh --project-name NAME --add-missing-profiles
        deploy-project.sh --project-name NAME --update-payloads
-       deploy-project.sh --all-projects --add-missing-profiles|--update-payloads
+       deploy-project.sh --project-name NAME --enable-ipv6
+       deploy-project.sh --all-projects --add-missing-profiles|--update-payloads|--enable-ipv6
 
 Creates a project, its OVN network and three profiles: NAME-linux, NAME-win
 and NAME-linux-docker (the Linux profile plus security.nesting and Docker
 Engine with the Compose plugin installed by cloud-init).
+
+The network is dual-stack when IPV6_SUBNET_PREFIX is set in .env: its IPv6 /64
+is <IPV6_SUBNET_PREFIX> subnet number <project ID> (see lib/ipv6.sh), routed
+(IPV6_NAT=false, the default) or NAT66 (IPV6_NAT=true). Without it the network
+is IPv4-only, as before.
 
 Options:
   --project-name NAME     Project name to create.
@@ -56,6 +67,13 @@ Options:
   --all-projects          With --add-missing-profiles or --update-payloads:
                           do it for every project these scripts manage (the
                           ones described "Project ID: N") instead of one.
+  --enable-ipv6           For an existing project, give its network the IPv6
+                          /64 from IPV6_SUBNET_PREFIX (or change it to match
+                          the current .env), register its gateway in DNS and
+                          print the route the upstream router needs. Running
+                          instances pick the prefix up by router advertisement;
+                          run dns/sync-dns-records.sh afterwards for their AAAA
+                          records.
   --update-payloads       For an existing project, rewrite the cloud-init /
                           cloudbase-init payload of its three standard profiles
                           from the current files (profiles copy the payload when
@@ -68,6 +86,7 @@ Examples:
   ./deploy-project.sh --project-name infra-edge --add-missing-profiles
   ./deploy-project.sh --project-name infra-edge --update-payloads
   ./deploy-project.sh --all-projects --add-missing-profiles
+  ./deploy-project.sh --all-projects --enable-ipv6
 EOF
 }
 
@@ -221,8 +240,45 @@ update_profile_payloads() {
   done
 }
 
+# Gives an existing project's network its IPv6 /64 (or updates it to the
+# current .env), registers the gateway in DNS and prints the upstream route.
+enable_ipv6() {
+  local id want_address want_nat have_address have_nat
+  ipv6_enabled || fail 'IPV6_SUBNET_PREFIX is not set in .env.'
+  ipv6_validate_prefix || exit 1
+  id="$(incus project show "${PROJECT_NAME}" | sed -n 's/^description: .*Project ID: \([0-9][0-9]*\).*/\1/p')"
+  [[ "${id}" =~ ^[0-9]+$ ]] || fail "project '${PROJECT_NAME}' is not a managed project (description \"Project ID: N\")."
+  want_address="$(ipv6_project_gateway "${id}")"
+  want_nat="$([[ "${IPV6_NAT:-false}" == 'true' ]] && echo true || echo false)"
+  have_address="$(incus network get "${NETWORK_NAME}" ipv6.address --project "${PROJECT_NAME}")"
+  have_nat="$(incus network get "${NETWORK_NAME}" ipv6.nat --project "${PROJECT_NAME}")"
+  ipv6_check_uplink "$(incus network get "${NETWORK_NAME}" network --project "${PROJECT_NAME}")" || exit 1
+  # Before the network hands out prefixes: instances without a public IPv4
+  # must not become reachable from the internet over routed IPv6.
+  if ipv6_routed; then
+    local instance
+    while IFS= read -r instance; do
+      [[ -n "${instance}" ]] || continue
+      [[ -n "$(incus config get "${instance}" user.public_ipv4 --project "${PROJECT_NAME}" 2>/dev/null)" ]] \
+        || fw_make_ipv6_internal "${instance}" "${PROJECT_NAME}" \
+        || fail "stopped before enabling IPv6 on '${NETWORK_NAME}': instance '${instance}' would be reachable from the internet over IPv6."
+    done < <(incus list --project "${PROJECT_NAME}" -c n -f csv 2>/dev/null)
+  fi
+  if [[ "${have_address}" == "${want_address}" && "${have_nat:-false}" == "${want_nat}" ]]; then
+    echo "Network '${NETWORK_NAME}' already has IPv6 ${want_address} (nat=${want_nat})."
+  else
+    echo "Network '${NETWORK_NAME}' IPv6: ${have_address:-unset} -> ${want_address} (nat=${want_nat})..."
+    run incus network set "${NETWORK_NAME}" ipv6.address="${want_address}" ipv6.nat="${want_nat}" --project "${PROJECT_NAME}"
+  fi
+  dns_register_project "${PROJECT_NAME}" "${want_address%/*}" || true
+  local route
+  route="$(ipv6_upstream_route "${NETWORK_NAME}" "${PROJECT_NAME}")"
+  [[ -z "${route}" ]] || echo "Upstream route needed: ${route}"
+}
+
 PROJECT_NAME=''
 PROJECT_ID=''
+ENABLE_IPV6=''
 ADD_MISSING_PROFILES=''
 UPDATE_PAYLOADS=''
 ALL_PROJECTS=''
@@ -238,6 +294,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --update-payloads)
       UPDATE_PAYLOADS='yes'
+      shift
+      ;;
+    --enable-ipv6)
+      ENABLE_IPV6='yes'
       shift
       ;;
     --project-name)
@@ -262,12 +322,13 @@ done
 
 # --all-projects: run the profile action once per managed project.
 if [[ -n "${ALL_PROJECTS}" ]]; then
-  [[ -n "${ADD_MISSING_PROFILES}${UPDATE_PAYLOADS}" ]] \
-    || fail '--all-projects needs --add-missing-profiles and/or --update-payloads.'
+  [[ -n "${ADD_MISSING_PROFILES}${UPDATE_PAYLOADS}${ENABLE_IPV6}" ]] \
+    || fail '--all-projects needs --add-missing-profiles, --update-payloads and/or --enable-ipv6.'
   [[ -z "${PROJECT_NAME}${PROJECT_ID}" ]] || fail '--all-projects cannot be combined with --project-name or --project-id.'
   ACTION_ARGS=()
   [[ -n "${ADD_MISSING_PROFILES}" ]] && ACTION_ARGS+=(--add-missing-profiles)
   [[ -n "${UPDATE_PAYLOADS}" ]] && ACTION_ARGS+=(--update-payloads)
+  [[ -n "${ENABLE_IPV6}" ]] && ACTION_ARGS+=(--enable-ipv6)
   mapfile -t ALL_PROJECT_NAMES < <(incus project list -f json | jq -r '.[] | select(.description | test("^Project ID: [0-9]+$")) | .name' | sort)
   (( ${#ALL_PROJECT_NAMES[@]} > 0 )) || fail 'no managed projects (described "Project ID: N") found.'
   FAILED=()
@@ -283,7 +344,7 @@ if [[ -z "${PROJECT_NAME}" ]]; then
   read -r -p 'Project name: ' PROJECT_NAME
 fi
 
-if [[ -n "${ADD_MISSING_PROFILES}" || -n "${UPDATE_PAYLOADS}" ]]; then
+if [[ -n "${ADD_MISSING_PROFILES}" || -n "${UPDATE_PAYLOADS}" || -n "${ENABLE_IPV6}" ]]; then
   [[ -n "${PROJECT_NAME}" ]] || fail 'project name cannot be empty.'
   [[ -f "${CLOUD_INIT_FILE}" ]] || fail "cloud-init file '${CLOUD_INIT_FILE}' not found."
   [[ -f "${CLOUDBASE_INIT_FILE}" ]] || fail "cloudbase-init file '${CLOUDBASE_INIT_FILE}' not found."
@@ -293,6 +354,7 @@ if [[ -n "${ADD_MISSING_PROFILES}" || -n "${UPDATE_PAYLOADS}" ]]; then
     || fail "project '${PROJECT_NAME}' has no network named '${NETWORK_NAME}'."
   [[ -n "${ADD_MISSING_PROFILES}" ]] && create_standard_profiles
   [[ -n "${UPDATE_PAYLOADS}" ]] && update_profile_payloads
+  [[ -n "${ENABLE_IPV6}" ]] && enable_ipv6
   exit 0
 fi
 
@@ -310,6 +372,8 @@ fi
 NETWORK_NAME="${PROJECT_NAME}"
 IPV4_ADDRESS="${IPV4_SUBNET_PREFIX}.${PROJECT_ID}.1/24"
 ROUTER_IPV4="${PROJECT_NAT_IPV4_PREFIX}.${PROJECT_ID}"
+ipv6_validate_prefix || exit 1
+mapfile -t IPV6_KEYS < <(ipv6_network_keys "${PROJECT_ID}")
 
 command -v incus >/dev/null 2>&1 || fail 'incus command not found in PATH.'
 [[ -f "${CLOUD_INIT_FILE}" ]] || fail "cloud-init file '${CLOUD_INIT_FILE}' not found."
@@ -329,6 +393,7 @@ sys.exit(1)
   || fail "router address ${ROUTER_IPV4} (project ID ${PROJECT_ID}) is outside uplink '${UPLINK_NETWORK}' ipv4.ovn.ranges (${OVN_RANGES}); pick a lower project ID."
 nat_used_addresses "${UPLINK_NETWORK}" | grep -qxF "${ROUTER_IPV4}" \
   && fail "router address ${ROUTER_IPV4} is already used on uplink '${UPLINK_NETWORK}' (is project ID ${PROJECT_ID} taken?)."
+ipv6_check_uplink "${UPLINK_NETWORK}" || exit 1
 [[ -n "$(incus network get "${UPLINK_NETWORK}" ipv4.routes --project default 2>/dev/null)" ]] \
   || echo "Warning: uplink '${UPLINK_NETWORK}' has no ipv4.routes; create-instance.sh cannot assign 1:1 NAT public IPs until a range is added." >&2
 
@@ -373,7 +438,7 @@ trap cleanup_network ERR
 # Presetting the router's uplink address makes Incus use it instead of taking
 # the next free address from ipv4.ovn.ranges; it is also the network's default
 # outbound NAT address.
-echo "Creating OVN network '${NETWORK_NAME}' with IPv4 subnet ${IPV4_ADDRESS}, router/NAT address ${ROUTER_IPV4}, uplink ${UPLINK_NETWORK}, MTU ${OVN_MTU}, and IPv6 disabled..."
+echo "Creating OVN network '${NETWORK_NAME}' with IPv4 subnet ${IPV4_ADDRESS}, router/NAT address ${ROUTER_IPV4}, uplink ${UPLINK_NETWORK}, MTU ${OVN_MTU}, and $([[ "${IPV6_KEYS[0]}" == 'ipv6.address=none' ]] && echo 'IPv6 disabled' || echo "IPv6 ${IPV6_KEYS[0]#ipv6.address=} (${IPV6_KEYS[1]})")..."
 run incus network create "${NETWORK_NAME}" \
   --project "${PROJECT_NAME}" \
   --type=ovn \
@@ -381,7 +446,7 @@ run incus network create "${NETWORK_NAME}" \
   bridge.mtu="${OVN_MTU}" \
   ipv4.address="${IPV4_ADDRESS}" \
   ipv4.nat=true \
-  ipv6.address=none \
+  "${IPV6_KEYS[@]}" \
   dns.domain="$(dns_project_name "${PROJECT_NAME}")" \
   volatile.network.ipv4.address="${ROUTER_IPV4}" </dev/null
 
@@ -389,6 +454,7 @@ run incus network create "${NETWORK_NAME}" \
 # domain to its instances, so <instance>.<project>.<zone> also resolves to
 # their internal address from inside the project.
 dns_register_project "${PROJECT_NAME}" "${IPV4_ADDRESS%/*}" || true
+ipv6_enabled && { dns_register_project "${PROJECT_NAME}" "$(ipv6_project_gateway "${PROJECT_ID}" | cut -d/ -f1)" || true; }
 
 run incus project set "${PROJECT_NAME}" restricted.networks.access="${NETWORK_NAME}"
 run incus project set "${PROJECT_NAME}" restricted.devices.nic=managed
@@ -404,6 +470,11 @@ echo
 echo 'Deployment complete.'
 echo "Project : ${PROJECT_NAME}"
 echo "Network : ${NETWORK_NAME} (${IPV4_ADDRESS}, NAT ${ROUTER_IPV4})"
+if ipv6_enabled; then
+  echo "IPv6    : $(ipv6_project_gateway "${PROJECT_ID}") ($([[ "${IPV6_NAT:-false}" == 'true' ]] && echo 'NAT66' || echo 'routed'))"
+  UPSTREAM_ROUTE="$(ipv6_upstream_route "${NETWORK_NAME}" "${PROJECT_NAME}")"
+  [[ -z "${UPSTREAM_ROUTE}" ]] || echo "Route   : the upstream router needs: ${UPSTREAM_ROUTE}"
+fi
 echo "DNS     : $(dns_project_name "${PROJECT_NAME}") -> ${IPV4_ADDRESS%/*}; instances as <instance>.$(dns_zone) and <instance>.$(dns_project_name "${PROJECT_NAME}")"
 echo "Uplink  : ${UPLINK_NETWORK}"
 echo "MTU     : ${OVN_MTU}"

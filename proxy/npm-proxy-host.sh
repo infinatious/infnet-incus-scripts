@@ -119,7 +119,7 @@ dns_zone_node() {
 technitium() {
   local endpoint="$1"; shift
   local response
-  response="$(curl -sS -G "${TECHNITIUM_URL%/}/api/${endpoint}" --data-urlencode "token=${TECHNITIUM_API_TOKEN}" "$@")" || return 1
+  response="$(curl -sS --connect-timeout 5 --max-time 30 -G "${TECHNITIUM_URL%/}/api/${endpoint}" --data-urlencode "token=${TECHNITIUM_API_TOKEN}" "$@")" || return 1
   [[ "$(jq -r '.status' <<< "${response}" 2>/dev/null)" == 'ok' ]] || { echo "Error: Technitium ${endpoint}: $(jq -r '.errorMessage // .' <<< "${response}")" >&2; return 1; }
 }
 
@@ -148,6 +148,12 @@ dns_set() {
       --data-urlencode 'type=A' --data-urlencode "ipAddress=${NPM_DNS_TARGET}" --data-urlencode 'ttl=300' \
       --data-urlencode 'overwrite=true' --data-urlencode "comments=NPM proxy host (proxy/npm-proxy-host.sh)" \
       && echo "DNS: ${domain} -> ${NPM_DNS_TARGET} in zone '${zone}'."
+    if [[ -n "${NPM_DNS_TARGET_IPV6:-}" ]]; then
+      technitium zones/records/add ${node:+--data-urlencode "node=${node}"} --data-urlencode "zone=${zone}" --data-urlencode "domain=${domain}" \
+        --data-urlencode 'type=AAAA' --data-urlencode "ipAddress=${NPM_DNS_TARGET_IPV6}" --data-urlencode 'ttl=300' \
+        --data-urlencode 'overwrite=true' --data-urlencode "comments=NPM proxy host (proxy/npm-proxy-host.sh)" \
+        && echo "DNS: ${domain} -> ${NPM_DNS_TARGET_IPV6} (AAAA) in zone '${zone}'."
+    fi
     # A local HTTPS (SVCB) record too: otherwise the public one is forwarded,
     # and Cloudflare's carries ECH, so browsers reach NPM with the outer name
     # cloudflare-ech.com instead of <domain> and NPM rejects the handshake
@@ -164,6 +170,10 @@ dns_set() {
     technitium zones/records/delete ${node:+--data-urlencode "node=${node}"} --data-urlencode "zone=${zone}" --data-urlencode "domain=${domain}" \
       --data-urlencode 'type=A' --data-urlencode "ipAddress=${NPM_DNS_TARGET}" \
       && echo "DNS: removed ${domain} -> ${NPM_DNS_TARGET} from zone '${zone}'."
+    if [[ -n "${NPM_DNS_TARGET_IPV6:-}" ]]; then
+      technitium zones/records/delete ${node:+--data-urlencode "node=${node}"} --data-urlencode "zone=${zone}" --data-urlencode "domain=${domain}" \
+        --data-urlencode 'type=AAAA' --data-urlencode "ipAddress=${NPM_DNS_TARGET_IPV6}" >/dev/null 2>&1 || true
+    fi
   fi
 }
 

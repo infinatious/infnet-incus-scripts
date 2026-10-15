@@ -52,11 +52,14 @@ MENU_1=(
   'Add missing profiles to a project'             'deploy-project.sh --add-missing-profiles'
   'Add missing profiles to all projects'          'deploy-project.sh --all-projects --add-missing-profiles'
   'Update profile payloads in all projects'       'deploy-project.sh --all-projects --update-payloads'
+  'Enable IPv6 on all projects'                   'deploy-project.sh --all-projects --enable-ipv6'
 )
 MENU_2=(
   'Cluster health report'                         'host/cluster-health.sh'
   'Check for Incus upgrades'                      'host/upgrade-incus.sh --check'
   'Upgrade Incus on all members (rolling)'        'host/upgrade-incus.sh'
+  'Set up IPv6 on the uplink (dry run)'           'host/uplink-ipv6.sh --dry-run'
+  'Set up IPv6 on the uplink'                     'host/uplink-ipv6.sh'
   'Re-run host setup (sudo, no disk wipe)'        'sudo host/setup-incus-host.sh'
   'Re-apply web UI branding (sudo)'               'sudo branding/apply-ui-branding.sh'
   'UEFI boot logo status'                         'branding/uefi-logo.sh status'
