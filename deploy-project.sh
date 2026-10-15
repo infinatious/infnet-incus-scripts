@@ -272,8 +272,8 @@ enable_ipv6() {
   fi
   dns_register_project "${PROJECT_NAME}" "${want_address%/*}" || true
   local route
-  route="$(ipv6_upstream_route "${NETWORK_NAME}" "${PROJECT_NAME}")"
-  [[ -z "${route}" ]] || echo "Upstream route needed: ${route}"
+  route="$(ipv6_route_note "${NETWORK_NAME}" "${PROJECT_NAME}")"
+  [[ -z "${route}" ]] || echo "Upstream route: ${route}"
 }
 
 PROJECT_NAME=''
@@ -472,8 +472,8 @@ echo "Project : ${PROJECT_NAME}"
 echo "Network : ${NETWORK_NAME} (${IPV4_ADDRESS}, NAT ${ROUTER_IPV4})"
 if ipv6_enabled; then
   echo "IPv6    : $(ipv6_project_gateway "${PROJECT_ID}") ($([[ "${IPV6_NAT:-false}" == 'true' ]] && echo 'NAT66' || echo 'routed'))"
-  UPSTREAM_ROUTE="$(ipv6_upstream_route "${NETWORK_NAME}" "${PROJECT_NAME}")"
-  [[ -z "${UPSTREAM_ROUTE}" ]] || echo "Route   : the upstream router needs: ${UPSTREAM_ROUTE}"
+  UPSTREAM_ROUTE="$(ipv6_route_note "${NETWORK_NAME}" "${PROJECT_NAME}")"
+  [[ -z "${UPSTREAM_ROUTE}" ]] || echo "Route   : ${UPSTREAM_ROUTE}"
 fi
 echo "DNS     : $(dns_project_name "${PROJECT_NAME}") -> ${IPV4_ADDRESS%/*}; instances as <instance>.$(dns_zone) and <instance>.$(dns_project_name "${PROJECT_NAME}")"
 echo "Uplink  : ${UPLINK_NETWORK}"

@@ -101,6 +101,22 @@ ipv6_check_uplink() {
   fi
 }
 
+# True when the project networks are advertised to the upstream router by BGP.
+bgp_enabled() { [[ -n "${BGP_LOCAL_ASN:-}" && -n "${BGP_PEER_ADDRESS:-}" ]]; }
+
+# One line for the summaries: how the upstream router learns a routed project
+# network (nothing for NAT66 or IPv4-only).
+ipv6_route_note() {
+  local network="$1" project="$2" route
+  ipv6_routed || return 0
+  if bgp_enabled; then
+    echo "advertised to ${BGP_PEER_ADDRESS} by BGP, nothing to add upstream"
+    return 0
+  fi
+  route="$(ipv6_upstream_route "${network}" "${project}")"
+  [[ -z "${route}" ]] || echo "the upstream router needs: ${route}"
+}
+
 # Prints what the upstream router needs for a routed project network:
 # "<project /64> via <router uplink address>".
 ipv6_upstream_route() {

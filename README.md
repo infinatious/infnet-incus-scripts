@@ -352,11 +352,26 @@ Instances use IPv6 as soon as their network has a prefix, so the upstream has to
 
 1. **Upstream.** Get the prefix routed to the site and a `/64` on the uplink segment (the upstream router's address on it is `UPLINK_IPV6_GATEWAY`). Check that the hosts' uplink NIC gets a global address by router advertisement.
 2. **Uplink.** Fill in the `UPLINK_IPV6_*`, `IPV6_SUBNET_PREFIX` and `IPV6_NAT` settings, then run `host/uplink-ipv6.sh` (`--dry-run` first) on one member. New hosts get the same from `host/setup-incus-host.sh`. For a routed prefix the script also adds it to the uplink's `ipv6.routes`: Incus refuses a routed (`ipv6.nat=false`) network whose subnet is not inside them.
-3. **Routes upstream (routed mode).** The prefix is not on-link, so the upstream router needs one route per project: the project's `/64` via its OVN router's address on the uplink (an address from `UPLINK_IPV6_OVN_RANGES`). `deploy-project.sh` prints it (`Route: the upstream router needs: 2001:db8:1200:18::/64 via 2001:db8:ff:1::10`). BGP on the uplink would avoid the per-project routes; the scripts don't set that up.
+3. **Routes upstream (routed mode).** The prefix is not on-link, so the upstream router needs one route per project: the project's `/64` via its OVN router's address on the uplink (an address from `UPLINK_IPV6_OVN_RANGES`). `deploy-project.sh` prints it (`Route: the upstream router needs: 2001:db8:1200:18::/64 via 2001:db8:ff:1::10`). With BGP (below) the router needs no per-project routes at all.
 4. **Projects.** New ones get IPv6 from `deploy-project.sh`. Existing ones: `./deploy-project.sh --all-projects --enable-ipv6` (or `--project-name NAME`). Running instances pick the prefix up from the next router advertisement, no restart. It is safe to repeat.
 5. **DNS.** `dns/sync-dns-records.sh` adds the AAAA records of running instances.
 
 Do 4 one project at a time at first. Taking IPv6 away again is `incus network set <project> ipv6.address=none --project <project>`.
+
+### BGP instead of static routes
+
+Incus can advertise the routed project networks itself, so the upstream router needs one BGP peering per site and nothing per project. Set `BGP_LOCAL_ASN` (Incus, a private AS number such as 65100), `BGP_PEER_ASN` (the router, e.g. 65000) and `BGP_PEER_ADDRESS` (the router's address on the hosts' management network) in `.env`, then:
+
+```bash
+./host/bgp.sh --dry-run && ./host/bgp.sh     # Incus side: server ASN, per-member address/router ID, the peer on the uplink
+./host/bgp-udm-config.sh                      # the router's side, printed
+```
+
+`bgp-udm-config.sh` prints FRR configuration from the same `.env`, so every site is built from one template: the router peers with each cluster member (eBGP, IPv6 unicast only), accepts only prefixes inside `IPV6_SUBNET_PREFIX` up to `/64` and announces nothing back. On a UniFi gateway it goes into the BGP page under the routing settings; the gateway itself needs no SSH access. Once a session is up, `deploy-project.sh` stops printing a route to add (`advertised ... by BGP, nothing to add upstream`) and a new project's `/64` shows up in the router's routing table by itself. Check the sessions with `ss -tn state established '( sport = :179 or dport = :179 )'` on each member; an instance answering a ping from outside is the end-to-end test.
+
+The router may also need an allow rule for TCP 179 from the members to itself. A password (`BGP_PASSWORD`) is optional and has to match on both sides.
+
+Status: `bgp-udm-config.sh` output is syntax-checked with FRR 10.5 (the gateway runs 10.1). The Incus side (`bgp.sh`) has not yet been run against a live peer.
 
 ### Firewall and exposure
 
@@ -506,7 +521,7 @@ sudo ./branding/uefi-logo.sh revert   # back to the stock firmware
 - `backup/restore-instance.sh` restores an instance, including its 1:1 NAT.
 - `dns/sync-dns-records.sh` creates or corrects the Technitium records of every instance and project.
 - `lib/public-ip.sh`, `lib/ipv6.sh`, `lib/firewall.sh` and `dns/technitium-dns.sh` are shared helpers, sourced by the scripts above.
-- `host/uplink-ipv6.sh` gives an existing uplink its IPv6 side ([IPv6](#ipv6-dual-stack)).
+- `host/uplink-ipv6.sh` gives an existing uplink its IPv6 side ([IPv6](#ipv6-dual-stack)); `host/bgp.sh` and `host/bgp-udm-config.sh` set up BGP towards the router ([BGP](#bgp-instead-of-static-routes)).
 - `host/setup-incus-host.sh` builds the host ([Host setup](#host-setup)); `host/cluster-enable.sh` and `host/cluster-join.sh` grow it into a cluster ([Clustering](#clustering)); `host/common.sh` holds their shared steps; `branding/apply-ui-branding.sh` brands the UI.
 
 `.env` stays at the repository root and is shared by every script. All scripts accept command-line arguments and fall back to interactive prompts for anything omitted.
