@@ -54,8 +54,10 @@ source "${ROOT_DIR}/lib/ipv6.sh"
 : "${BGP_PEER_ADDRESS:?BGP_PEER_ADDRESS not set in ${ENV_FILE}}"
 [[ "${BGP_LOCAL_ASN}" =~ ^[0-9]+$ && "${BGP_PEER_ASN}" =~ ^[0-9]+$ ]] || fail 'BGP_LOCAL_ASN and BGP_PEER_ASN must be numbers.'
 [[ "${BGP_LOCAL_ASN}" != "${BGP_PEER_ASN}" ]] || fail 'BGP_LOCAL_ASN and BGP_PEER_ASN are equal; the sessions are meant to be eBGP (different AS numbers).'
-ipv6_enabled || fail 'IPV6_SUBNET_PREFIX is not set in .env.'
-ipv6_validate_prefix || exit 1
+if [[ -z "${NO_PREFIX_LIST}" ]]; then
+  ipv6_enabled || fail 'IPV6_SUBNET_PREFIX is not set in .env (needed for the prefix filter; --no-prefix-list does without).'
+  ipv6_validate_prefix || exit 1
+fi
 
 if [[ -n "${NEIGHBORS_ARG}" ]]; then
   mapfile -t MEMBER_IPS < <(tr ',' '\n' <<< "${NEIGHBORS_ARG}")
@@ -71,7 +73,8 @@ else
 fi
 (( ${#MEMBER_IPS[@]} > 0 )) || fail 'no neighbors.'
 
-PREFIX="$(python3 -c 'import ipaddress,sys; print(ipaddress.IPv6Network(sys.argv[1]))' "${IPV6_SUBNET_PREFIX}")"
+PREFIX=''
+[[ -n "${NO_PREFIX_LIST}" ]] || PREFIX="$(python3 -c 'import ipaddress,sys; print(ipaddress.IPv6Network(sys.argv[1]))' "${IPV6_SUBNET_PREFIX}")"
 
 if [[ -z "${NO_PREFIX_LIST}" ]]; then
   cat <<EOT
