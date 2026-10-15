@@ -116,18 +116,13 @@ ipv6_check_uplink() {
   fi
 }
 
-# True when the project networks are advertised to the upstream router by BGP.
-bgp_enabled() { [[ -n "${BGP_LOCAL_ASN:-}" && -n "${BGP_PEER_ADDRESS:-}" ]]; }
-
-# One line for the summaries: how the upstream router learns a routed project
-# network (nothing for NAT66 or IPv4-only).
+# One line for the summaries: what the upstream router needs to reach a routed
+# project network (nothing for NAT66 or IPv4-only). Incus 7.5 does not announce
+# OVN project subnets over BGP, so the route has to exist on the router (a
+# static route, or a BGP speaker of our own).
 ipv6_route_note() {
   local network="$1" project="$2" route
   ipv6_routed || return 0
-  if bgp_enabled; then
-    echo "advertised to ${BGP_PEER_ADDRESS} by BGP, nothing to add upstream"
-    return 0
-  fi
   route="$(ipv6_upstream_route "${network}" "${project}")"
   [[ -z "${route}" ]] || echo "the upstream router needs: ${route}"
 }

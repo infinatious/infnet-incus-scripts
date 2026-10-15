@@ -353,26 +353,19 @@ Instances use IPv6 as soon as their network has a prefix, so the upstream has to
 
 1. **Upstream.** Get the prefix routed to the site and a `/64` on the uplink segment (the upstream router's address on it is `UPLINK_IPV6_GATEWAY`). Check that the hosts' uplink NIC gets a global address by router advertisement.
 2. **Uplink.** Fill in the `UPLINK_IPV6_*`, `IPV6_SUBNET_PREFIX` and `IPV6_NAT` settings, then run `host/uplink-ipv6.sh` (`--dry-run` first) on one member. New hosts get the same from `host/setup-incus-host.sh`. For a routed prefix the script also adds it to the uplink's `ipv6.routes`: Incus refuses a routed (`ipv6.nat=false`) network whose subnet is not inside them.
-3. **Routes upstream (routed mode).** The prefix is not on-link, so the upstream router needs one route per project: the project's `/64` via its OVN router's address on the uplink (an address from `UPLINK_IPV6_OVN_RANGES`). `deploy-project.sh` prints it (`Route: the upstream router needs: 2001:db8:1200:18::/64 via 2001:db8:ff:1::10`). With BGP (below) the router needs no per-project routes at all.
+3. **Routes upstream (routed mode).** The prefix is not on-link, so the upstream router needs one route per project: the project's `/64` via its OVN router's address on the uplink (an address from `UPLINK_IPV6_OVN_RANGES`). `deploy-project.sh` prints it (`Route: the upstream router needs: 2001:db8:1200:18::/64 via 2001:db8:ff:1::10`). Incus alone cannot announce these over BGP (see below).
 4. **Projects.** New ones get IPv6 from `deploy-project.sh`. Existing ones: `./deploy-project.sh --all-projects --enable-ipv6` (or `--project-name NAME`). Running instances pick the prefix up from the next router advertisement, no restart. It is safe to repeat.
 5. **DNS.** `dns/sync-dns-records.sh` adds the AAAA records of running instances.
 
 Do 4 one project at a time at first. Taking IPv6 away again is `incus network set <project> ipv6.address=none --project <project>`.
 
-### BGP instead of static routes
+### BGP: what Incus can and cannot do
 
-Incus can advertise the routed project networks itself, so the upstream router needs one BGP peering per site and nothing per project. Set `BGP_LOCAL_ASN` (Incus, a private AS number such as 65100), `BGP_PEER_ASN` (the router, e.g. 65000) and `BGP_PEER_ADDRESS` (the router's address on the hosts' management network) in `.env`, then:
+Incus has a BGP server (`host/bgp.sh` sets it up, `host/bgp-udm-config.sh` prints a matching FRR config for the router), and sessions to a UniFi gateway establish and negotiate IPv6 unicast. **But Incus 7.5 does not announce an OVN project network's own `/64`**: the network has no BGP keys, and with sessions up the router received 0 prefixes, for a project created with IPv6 and for one converted by `--enable-ipv6` alike. It announces forwards, load balancers and externally routed NIC addresses, which is not what routed project subnets need. So BGP from Incus alone does not replace the per-project routes.
 
-```bash
-./host/bgp.sh --dry-run && ./host/bgp.sh     # Incus side: server ASN, per-member address/router ID, the peer on the uplink
-./host/bgp-udm-config.sh                      # the router's side, printed
-```
+What does work: the router needs one route per project `/64` via that project's OVN router address on the uplink (printed by `deploy-project.sh` and `--enable-ipv6`), or a BGP speaker of our own that announces the project subnets. Do not enable IPv6 on a project before its route exists: instances get addresses and then stall on connections until they fall back to IPv4.
 
-`bgp-udm-config.sh` prints FRR configuration from the same `.env`, so every site is built from one template: the router peers with each cluster member (eBGP, IPv6 unicast only), accepts only prefixes inside `IPV6_SUBNET_PREFIX` up to `/64` and announces nothing back. On a UniFi gateway it goes into the BGP page under the routing settings; the gateway itself needs no SSH access. Once a session is up, `deploy-project.sh` stops printing a route to add (`advertised ... by BGP, nothing to add upstream`) and a new project's `/64` shows up in the router's routing table by itself. Check the sessions with `ss -tn state established '( sport = :179 or dport = :179 )'` on each member; an instance answering a ping from outside is the end-to-end test.
-
-The router may also need an allow rule for TCP 179 from the members to itself. A password (`BGP_PASSWORD`) is optional and has to match on both sides.
-
-Status: `bgp-udm-config.sh` output is syntax-checked with FRR 10.5 (the gateway runs 10.1). `bgp.sh` is applied on us-west: the address and router ID are per member, the AS number is cluster-wide, and every member listens on TCP 179.
+`bgp.sh` and `bgp-udm-config.sh` stay for now: the sessions are real and verified (all three members established, IPv6 unicast negotiated), and the generated FRR file loads on a UDM. They do not make project networks reachable by themselves.
 
 ### Firewall and exposure
 

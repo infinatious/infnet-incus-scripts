@@ -14,9 +14,10 @@ usage() {
   cat <<'EOT'
 Usage: bgp.sh [--dry-run] [--remove]
 
-Makes Incus advertise the routed project networks (the IPv6 /64s of
-deploy-project.sh) to the upstream router over BGP, so the router needs no
-static route per project. Settings come from .env:
+Sets up Incus's BGP server and a peering with the upstream router. NOTE:
+Incus 7.5 announces forwards, load balancers and externally routed NIC
+addresses, but NOT an OVN project network's own /64, so this alone does not make
+routed project networks reachable (see the README). Settings come from .env:
   BGP_LOCAL_ASN     Incus's private AS number (e.g. 65100), the same on every member
   BGP_PEER_ASN      the router's AS number (e.g. 65000)
   BGP_PEER_ADDRESS  the router's address that the hosts reach over their
@@ -30,9 +31,7 @@ What it sets:
                  core.bgp_routerid=<its cluster address> (per member), plus
                  core.bgp_asn once for the cluster
   the uplink     bgp.peers.<name>.address / .asn (/ .password)
-Project networks are then advertised by Incus itself while they are routed
-(ipv6.nat=false); nothing is configured per project. The router's side is
-printed by host/bgp-udm-config.sh. On a cluster, run this on any one member.
+The router's side is printed by host/bgp-udm-config.sh. On a cluster, run this on any one member.
 
 Options:
   --dry-run   Show what would change.
