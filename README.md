@@ -341,6 +341,7 @@ IPv6 is optional and off until `IPV6_SUBNET_PREFIX` is set in `.env`; without it
 |---|---|
 | `UPLINK_IPV6_GATEWAY`, `UPLINK_IPV6_OVN_RANGES`, `UPLINK_IPV6_ROUTES` | The uplink's own IPv6 side: the upstream router's address on the uplink `/64` (with prefix length), a range on that `/64` for the OVN routers' uplink ports (one per project network), optional extra prefixes. `UPLINK_DNS_NAMESERVERS` may mix IPv4 and IPv6 resolvers; the IPv6 ones also reach instances as RDNSS. |
 | `IPV6_SUBNET_PREFIX` | The prefix (no longer than `/56`) project networks are carved from. A project's `/64` is this prefix plus the project ID as the subnet number, in hex: ID 24 of `2001:db8:1200::/48` is `2001:db8:1200:18::/64`. |
+| `IPV6_SUBNET_FROM_TOP` | `true` counts down from the top instead: subnet number = 255 minus the ID, so ID 24 of a `/56` is `…:e7::/64`. Use it behind a UniFi gateway, which gives its own VLANs the lowest free prefix IDs (and whose choice you can't override), so the two never meet. Decide it before the first project gets IPv6. |
 | `IPV6_NAT` | `false` (default): **routed**, instances get global addresses. `true`: **NAT66**, for a ULA prefix (`fd00::/8`): instances reach out through the router's uplink address and nothing is routed in. |
 | `IPV6_INTERNAL_CIDRS` | Who may reach an instance made with `--no-public-ip` (default: `IPV6_SUBNET_PREFIX` and `fe80::/10`). |
 | `INFNET_IPV6_CIDRS` | Added to `10.100.0.0/16` for the `infnet` source alias in `firewall-manager.sh`. |

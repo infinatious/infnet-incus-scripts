@@ -9,6 +9,12 @@
 #                       carved from: the project's ID is the subnet number, so
 #                       ID 24 of 2001:db8:1200::/48 is 2001:db8:1200:18::/64
 #                       (the ID in hex, like the IPv4 side it follows).
+#   IPV6_SUBNET_FROM_TOP  true: count the project subnets down from the top of the
+#                       prefix (subnet number 255 minus the ID, so ID 24 of a /56
+#                       is ...:e7::/64) instead of up from the bottom. A UniFi
+#                       gateway hands its own VLANs the lowest free prefix IDs,
+#                       so this keeps the two apart. Never change it once
+#                       projects have IPv6; --enable-ipv6 renumbers them.
 #   IPV6_NAT            false (default): routed. Instances get global addresses
 #                       from the prefix, the uplink's upstream router must route
 #                       each project /64 to its OVN router (the scripts print the
@@ -39,13 +45,22 @@ if net.prefixlen > 56:
 ' "${IPV6_SUBNET_PREFIX}"
 }
 
+# <project id> -> the project's subnet number inside the prefix.
+ipv6_subnet_number() {
+  if [[ "${IPV6_SUBNET_FROM_TOP:-false}" == 'true' ]]; then
+    echo $(( 255 - $1 ))
+  else
+    echo "$1"
+  fi
+}
+
 # <project id> -> the project's /64, e.g. 2001:db8:1200:18::/64.
 ipv6_project_subnet() {
   python3 -c '
 import ipaddress, sys
 net = ipaddress.IPv6Network(sys.argv[1], strict=True)
 print(ipaddress.IPv6Network((int(net.network_address) + (int(sys.argv[2]) << 64), 64)))
-' "${IPV6_SUBNET_PREFIX}" "$1"
+' "${IPV6_SUBNET_PREFIX}" "$(ipv6_subnet_number "$1")"
 }
 
 # <project id> -> the network's gateway address with prefix, e.g. 2001:db8:1200:18::1/64.
@@ -54,7 +69,7 @@ ipv6_project_gateway() {
 import ipaddress, sys
 net = ipaddress.IPv6Network(sys.argv[1], strict=True)
 print(f"{ipaddress.IPv6Address(int(net.network_address) + (int(sys.argv[2]) << 64) + 1)}/64")
-' "${IPV6_SUBNET_PREFIX}" "$1"
+' "${IPV6_SUBNET_PREFIX}" "$(ipv6_subnet_number "$1")"
 }
 
 # Prints the source ranges allowed to reach an instance that is not public.
