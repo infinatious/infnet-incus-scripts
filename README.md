@@ -371,7 +371,7 @@ Incus can advertise the routed project networks itself, so the upstream router n
 
 The router may also need an allow rule for TCP 179 from the members to itself. A password (`BGP_PASSWORD`) is optional and has to match on both sides.
 
-Status: `bgp-udm-config.sh` output is syntax-checked with FRR 10.5 (the gateway runs 10.1). The Incus side (`bgp.sh`) has not yet been run against a live peer.
+Status: `bgp-udm-config.sh` output is syntax-checked with FRR 10.5 (the gateway runs 10.1). `bgp.sh` is applied on us-west: the address and router ID are per member, the AS number is cluster-wide, and every member listens on TCP 179.
 
 ### Firewall and exposure
 

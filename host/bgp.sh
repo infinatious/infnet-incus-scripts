@@ -91,12 +91,19 @@ set_config() {
 
 set_uplink() {
   local key="$1" value="$2" have
+  local shown_have shown_value
   have="$(incus network get "${UPLINK_NETWORK}" "${key}" --project default 2>/dev/null || true)"
+  # Passwords are never echoed.
+  if [[ "${key}" == *password ]]; then
+    shown_have="${have:+<set>}"; shown_value="${value:+<set>}"
+  else
+    shown_have="${have}"; shown_value="${value}"
+  fi
   if [[ "${have}" == "${value}" ]]; then
-    echo "OK       ${UPLINK_NETWORK} ${key} = ${value:-<unset>}"
+    echo "OK       ${UPLINK_NETWORK} ${key} = ${shown_value:-<unset>}"
     return 0
   fi
-  echo "Change   ${UPLINK_NETWORK} ${key}: ${have:+<set>}${have:-<unset>} -> ${value:+<set>}${value:-<unset>}"
+  echo "Change   ${UPLINK_NETWORK} ${key}: ${shown_have:-<unset>} -> ${shown_value:-<unset>}"
   [[ -n "${DRY_RUN}" ]] && return 0
   if [[ -z "${value}" ]]; then
     incus network unset "${UPLINK_NETWORK}" "${key}" --project default </dev/null
