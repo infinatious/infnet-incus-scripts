@@ -105,6 +105,7 @@ router bgp ${BGP_LOCAL_ASN}
  no bgp network import-check
  neighbor ${BGP_PEER_ADDRESS} remote-as ${BGP_PEER_ASN}
  neighbor ${BGP_PEER_ADDRESS} description router
+ neighbor ${BGP_PEER_ADDRESS} ebgp-multihop 3
 ${password_line}
  !
  address-family ipv6 unicast
@@ -196,6 +197,7 @@ install_speaker() {
   if [[ -z "${BGP_SPEAKER_RESET:-}" ]] \
     && run_in "${name}" "${project}" grep -q "^router bgp ${BGP_LOCAL_ASN}\$" /etc/frr/frr.conf 2>/dev/null \
     && run_in "${name}" "${project}" grep -q "neighbor ${BGP_PEER_ADDRESS} remote-as ${BGP_PEER_ASN}" /etc/frr/frr.conf 2>/dev/null \
+    && run_in "${name}" "${project}" grep -q "neighbor ${BGP_PEER_ADDRESS} ebgp-multihop" /etc/frr/frr.conf 2>/dev/null \
     && run_in "${name}" "${project}" grep -q '^bgpd=yes' /etc/frr/daemons; then
     echo "OK       ${name}: BGP base configuration present."
     return 0

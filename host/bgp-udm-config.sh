@@ -83,6 +83,7 @@ router bgp ${BGP_PEER_ASN}
  no bgp default ipv4-unicast
  neighbor INCUS peer-group
  neighbor INCUS remote-as ${BGP_LOCAL_ASN}
+ neighbor INCUS ebgp-multihop 3
 EOT
 [[ -z "${BGP_PASSWORD:-}" ]] || echo " neighbor INCUS password ${BGP_PASSWORD}"
 for ip in "${MEMBER_IPS[@]}"; do

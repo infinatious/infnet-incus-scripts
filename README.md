@@ -361,7 +361,7 @@ Do 4 one project at a time at first. Taking IPv6 away again is `incus network se
 
 ### BGP speakers: no per-project routes on the router
 
-A routed project network is only reachable if the upstream router has a route to its `/64` via the project's OVN router address on the uplink. **Incus 7.5 does not announce those subnets over BGP** (an OVN network has no BGP keys; with sessions up, the router received 0 prefixes), so small FRR instances do it. They are ordinary instances (Ubuntu, a public IPv4, one per cluster member that should survive another's loss) that peer with the router over the uplink and announce every routed project `/64` with that project's OVN router address as next hop. The router needs one BGP config per site and nothing per project.
+A routed project network is only reachable if the upstream router has a route to its `/64` via the project's OVN router address on the uplink. **Incus 7.5 does not announce those subnets over BGP** (an OVN network has no BGP keys; with sessions up, the router received 0 prefixes), so small FRR instances do it. They are ordinary instances (Ubuntu, a public IPv4, one per cluster member that should survive another's loss) that peer with the router over the uplink and announce every routed project `/64` with that project's OVN router address as next hop. The router needs one BGP config per site and nothing per project. The speakers sit behind their project's OVN router, one hop away from the router, so both sides use `ebgp-multihop`: eBGP packets otherwise carry a TTL of 1 and die at that hop (a lab with both ends on one network does not show this).
 
 Setup, once per site:
 
