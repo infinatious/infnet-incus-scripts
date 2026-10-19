@@ -7,8 +7,13 @@
 #   ops-job.sh start JOBID ACTION JSON   run ACTION in the background
 #
 # Actions (JSON arguments):
-#   backup   {"project","instance","tag","description","requested_by"}
-#   restore  {"project","instance","backup_file","in_place","new_name","requested_by"}
+#   backup           {"project","instance","tag","description","requested_by"}
+#   restore          {"project","instance","backup_file","in_place","new_name","requested_by"}
+#   create-project   {"name","project_id","ipv6"}
+#   delete-project   {"project","backup_first","requested_by"}
+#   create-instance  {"project","environment","service_code","profile_type","cpu","ram_mib","disk",
+#                     "image_alias","empty","public_ip","target","description_suffix"}
+#   delete-instance  {"project","instance" | "items":[{"project","instance"}],"backup_first","requested_by"}
 #
 # Jobs live in ${OPS_JOBS_DIR:-/var/lib/infnet-ops/jobs}/JOBID/{log,status.json}.
 set -uo pipefail
@@ -123,10 +128,122 @@ run_restore() {
   fi
 }
 
+jq_bool() {
+  # jq_bool KEY DEFAULT -> true|false from JOB_PARAMS ("//" would treat false as missing)
+  jq -r --arg k "$1" --arg d "$2" 'if has($k) and .[$k] != null then (.[$k] | tostring) else $d end' <<< "${JOB_PARAMS}"
+}
+
+run_create_project() {
+  local name id ipv6
+  name="$(jq -r '.name // empty' <<< "${JOB_PARAMS}")"
+  id="$(jq -r '.project_id // empty | tostring' <<< "${JOB_PARAMS}")"
+  ipv6="$(jq_bool ipv6 true)"
+  valid_name "${name}" || { echo "Error: invalid project name."; return 2; }
+  [[ "${id}" =~ ^[0-9]+$ ]] && (( id >= 2 && id <= 253 )) || { echo "Error: the project ID must be a number from 2 to 253."; return 2; }
+  incus project show "${name}" >/dev/null 2>&1 </dev/null && { echo "Error: project '${name}' already exists."; return 2; }
+  local args=(--project-name "${name}" --project-id "${id}")
+  [[ "${ipv6}" == "true" ]] || args+=(--no-ipv6)
+  "${ROOT_DIR}/deploy-project.sh" "${args[@]}" </dev/null
+}
+
+run_delete_project() {
+  local project pid backup_first by
+  project="$(jq -r '.project // empty' <<< "${JOB_PARAMS}")"
+  backup_first="$(jq_bool backup_first true)"
+  by="$(jq -r '.requested_by // "web-ui"' <<< "${JOB_PARAMS}")"
+  valid_name "${project}" || { echo "Error: invalid project name."; return 2; }
+  valid_text "${by}" || { echo "Error: invalid requester."; return 2; }
+  pid="$(project_id_of "${project}")"
+  [[ -n "${pid}" ]] || { echo "Error: '${project}' is not a project managed by these scripts (no Project ID)."; return 2; }
+  if [[ "${backup_first}" == "true" ]]; then
+    echo "== Backing up every instance in ${project} first =="
+    "${ROOT_DIR}/backup/backup-instances.sh" --all-members --project "${project}" --tag pre-delete \
+      --description "before deleting project ${project}" --requested-by "${by}" --no-prune \
+      || { echo "Error: the backup failed; nothing was deleted."; return 3; }
+  fi
+  echo "== Deleting project ${project} (ID ${pid}) and its instances =="
+  "${ROOT_DIR}/delete-project.sh" --project-id "${pid}" --delete-instances --yes </dev/null
+}
+
+run_create_instance() {
+  local project pid env code ptype cpu ram disk image empty pub target suffix
+  project="$(jq -r '.project // empty' <<< "${JOB_PARAMS}")"
+  env="$(jq -r '.environment // "p"' <<< "${JOB_PARAMS}")"
+  code="$(jq -r '.service_code // empty' <<< "${JOB_PARAMS}")"
+  ptype="$(jq -r '.profile_type // "linux"' <<< "${JOB_PARAMS}")"
+  cpu="$(jq -r '.cpu // empty | tostring' <<< "${JOB_PARAMS}")"
+  ram="$(jq -r '.ram_mib // empty | tostring' <<< "${JOB_PARAMS}")"
+  disk="$(jq -r '.disk // empty | tostring' <<< "${JOB_PARAMS}")"
+  image="$(jq -r '.image_alias // empty' <<< "${JOB_PARAMS}")"
+  empty="$(jq_bool empty false)"
+  pub="$(jq -r '.public_ip // "random"' <<< "${JOB_PARAMS}")"
+  target="$(jq -r '.target // empty' <<< "${JOB_PARAMS}")"
+  suffix="$(jq -r '.description_suffix // empty' <<< "${JOB_PARAMS}")"
+  valid_name "${project}" || { echo "Error: invalid project."; return 2; }
+  [[ "${env}" =~ ^[ptqd]$ ]] || { echo "Error: environment must be p, t, q or d."; return 2; }
+  [[ "${code}" =~ ^[A-Za-z0-9]{5}$ ]] || { echo "Error: the service code must be 5 letters or digits."; return 2; }
+  case "${ptype}" in linux|win|docker) ;; *) echo "Error: invalid profile type."; return 2 ;; esac
+  [[ "${cpu}" =~ ^[0-9]+$ ]] && (( cpu >= 1 && cpu <= 128 )) || { echo "Error: invalid CPU count."; return 2; }
+  [[ "${ram}" =~ ^[0-9]+$ ]] && (( ram >= 128 && ram <= 4194304 )) || { echo "Error: invalid RAM."; return 2; }
+  [[ "${disk}" =~ ^[0-9]+$ ]] && (( disk >= 1 && disk <= 16384 )) || { echo "Error: invalid disk size."; return 2; }
+  [[ -z "${target}" ]] || valid_name "${target}" || { echo "Error: invalid zone."; return 2; }
+  valid_text "${suffix}" || { echo "Error: invalid description."; return 2; }
+  pid="$(project_id_of "${project}")"
+  [[ -n "${pid}" ]] || { echo "Error: '${project}' is not a project managed by these scripts (no Project ID)."; return 2; }
+  local args=(--project-id "${pid}" --environment "${env}" --service-code "${code}" --profile-type "${ptype}"
+    --cpu "${cpu}" --ram-mib "${ram}" --disk "${disk}")
+  if [[ "${empty}" == "true" ]]; then
+    args+=(--empty)
+  else
+    valid_name "${image}" || { echo "Error: choose an image."; return 2; }
+    args+=(--image-alias "${image}")
+  fi
+  case "${pub}" in
+    none) args+=(--no-public-ip) ;;
+    random) args+=(--public-ip random) ;;
+    *) [[ "${pub}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "Error: invalid public IP."; return 2; }; args+=(--public-ip "${pub}") ;;
+  esac
+  [[ -z "${target}" ]] || args+=(--target "${target}")
+  [[ -z "${suffix}" ]] || args+=(--description-suffix "${suffix}")
+  "${ROOT_DIR}/create-instance.sh" "${args[@]}" </dev/null
+}
+
+delete_one_instance() {
+  # delete_one_instance PROJECT INSTANCE BACKUP_FIRST BY
+  local project="$1" instance="$2" backup_first="$3" by="$4" pid
+  valid_name "${project}" && valid_name "${instance}" || { echo "Error: invalid project or instance."; return 2; }
+  pid="$(project_id_of "${project}")"
+  [[ -n "${pid}" ]] || { echo "Error: '${project}' is not a project managed by these scripts (no Project ID)."; return 2; }
+  incus info "${instance}" --project "${project}" >/dev/null 2>&1 </dev/null || { echo "Error: instance '${instance}' not found in '${project}'."; return 2; }
+  if [[ "${backup_first}" == "true" ]]; then
+    echo "== Backing up ${instance} first =="
+    "${ROOT_DIR}/backup/backup-instances.sh" --all-members --project "${project}" --instance "${instance}" \
+      --tag pre-delete --description "before deleting ${instance}" --requested-by "${by}" --no-prune \
+      || { echo "Error: the backup failed; ${instance} was not deleted."; return 3; }
+  fi
+  echo "== Deleting ${instance} =="
+  "${ROOT_DIR}/delete-instance.sh" --project-id "${pid}" --instance-name "${instance}" --yes </dev/null
+}
+
+run_delete_instance() {
+  # One instance ("project", "instance") or several ("items": [{"project","instance"}]).
+  local backup_first by line project instance code=0 rc
+  backup_first="$(jq_bool backup_first true)"
+  by="$(jq -r '.requested_by // "web-ui"' <<< "${JOB_PARAMS}")"
+  valid_text "${by}" || { echo "Error: invalid requester."; return 2; }
+  while IFS=$'\t' read -r project instance; do
+    [[ -n "${project}" ]] || continue
+    delete_one_instance "${project}" "${instance}" "${backup_first}" "${by}"
+    rc=$?
+    (( rc == 0 )) || code=${rc}
+  done < <(jq -r 'if has("items") then .items[] | "\(.project)\t\(.instance)" else "\(.project // "")\t\(.instance // "")" end' <<< "${JOB_PARAMS}")
+  return ${code}
+}
+
 start_job() {
   JOB_ID="${1:-}"; JOB_ACTION="${2:-}"; JOB_PARAMS="${3:-}"
   [[ "${JOB_ID}" =~ ^[A-Za-z0-9-]{6,64}$ ]] || fail "invalid job id."
-  case "${JOB_ACTION}" in backup|restore) ;; *) fail "unknown action '${JOB_ACTION}'." ;; esac
+  case "${JOB_ACTION}" in backup|restore|create-project|delete-project|create-instance|delete-instance) ;; *) fail "unknown action '${JOB_ACTION}'." ;; esac
   jq -e 'type == "object"' <<< "${JOB_PARAMS}" >/dev/null 2>&1 || fail "arguments must be a JSON object."
   JOB_DIR="${JOBS_DIR}/${JOB_ID}"
   [[ ! -e "${JOB_DIR}" ]] || fail "job ${JOB_ID} already exists."
@@ -139,6 +256,10 @@ start_job() {
     case "${JOB_ACTION}" in
       backup) run_backup ;;
       restore) run_restore ;;
+      create-project) run_create_project ;;
+      delete-project) run_delete_project ;;
+      create-instance) run_create_instance ;;
+      delete-instance) run_delete_instance ;;
     esac
     code=$?
     echo "[$(date -u +%T)] finished with exit code ${code}"

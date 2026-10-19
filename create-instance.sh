@@ -13,7 +13,7 @@ fail() {
 
 usage() {
   cat <<'EOF'
-Usage: create-instance.sh --project-id ID --environment ENV --service-code CODE --profile-type TYPE [--cpu N] [--ram GIB] [--disk GIB] [--image-index N] [--image-alias NAME] [--public-ip IP|random | --no-public-ip] [--description-suffix TEXT] [--empty] [--target MEMBER]
+Usage: create-instance.sh --project-id ID --environment ENV --service-code CODE --profile-type TYPE [--cpu N] [--ram GIB | --ram-mib MIB] [--disk GIB] [--image-index N] [--image-alias NAME] [--public-ip IP|random | --no-public-ip] [--description-suffix TEXT] [--empty] [--target MEMBER]
 
 Options:
   --project-id ID          Numeric project ID to select the project.
@@ -23,6 +23,8 @@ Options:
                            with Docker and Compose preinstalled).
   --cpu N                  Override CPU core count.
   --ram GIB                Override RAM size in GiB.
+  --ram-mib MIB            Override RAM size in MiB (for sizes below 1 GiB or in
+                           between; at least 128). Instead of --ram.
   --disk GIB               Override boot disk size in GiB.
   --image-index N          Pick the desired image by the displayed list index.
   --image-alias NAME       Pick an image by exact alias name.
@@ -89,6 +91,7 @@ SERVICE_CODE_ARG=''
 PROFILE_TYPE_ARG=''
 CPU_ARG=''
 RAM_ARG=''
+RAM_MIB_ARG=''
 DISK_ARG=''
 IMAGE_INDEX_ARG=''
 IMAGE_ALIAS_ARG=''
@@ -127,6 +130,11 @@ while [[ $# -gt 0 ]]; do
     --ram)
       [[ $# -ge 2 ]] || fail 'missing value for --ram.'
       RAM_ARG="$2"
+      shift 2
+      ;;
+    --ram-mib)
+      [[ $# -ge 2 ]] || fail 'missing value for --ram-mib.'
+      RAM_MIB_ARG="$2"
       shift 2
       ;;
     --disk)
@@ -300,6 +308,8 @@ fi
 CPU_CORES="${CPU_CORES:-${PROFILE_CPU_CORES}}"
 if [[ -n "${RAM_ARG}" ]]; then
   RAM_GIB="${RAM_ARG}"
+elif [[ -n "${RAM_MIB_ARG}" ]]; then
+  RAM_GIB="${PROFILE_RAM_GIB}"
 else
   read -r -p "RAM (GiB, number only) [${PROFILE_RAM_GIB}]: " RAM_GIB
 fi
@@ -313,6 +323,12 @@ DISK_GIB="${DISK_GIB:-${PROFILE_DISK_GIB}}"
 
 [[ "${CPU_CORES}" =~ ^[0-9]+$ ]] || fail 'CPU cores must be numeric.'
 [[ "${RAM_GIB}" =~ ^[0-9]+$ ]] || fail 'RAM must be numeric GiB.'
+if [[ -n "${RAM_MIB_ARG}" ]]; then
+  [[ "${RAM_MIB_ARG}" =~ ^[0-9]+$ ]] && (( RAM_MIB_ARG >= 128 )) || fail '--ram-mib must be a number of MiB, at least 128.'
+  RAM_LIMIT="${RAM_MIB_ARG}MiB"
+else
+  RAM_LIMIT="${RAM_GIB}GiB"
+fi
 [[ "${DISK_GIB}" =~ ^[0-9]+$ ]] || fail 'boot disk size must be numeric GiB.'
 
 incus network show "${NETWORK_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || fail "network '${NETWORK_NAME}' does not exist in project '${PROJECT_NAME}'."
@@ -444,9 +460,9 @@ fi
 INSTANCE_NAME="$(printf '%s%02d' "${NAME_PREFIX}" "${NEXT_SEQ}")"
 
 if [[ -n "${EMPTY_ARG}" ]]; then
-  INIT_ARGS=(init --empty --project "${PROJECT_NAME}" --profile "${PROFILE_NAME}" "${INSTANCE_NAME}" -c limits.cpu="${CPU_CORES}" -c limits.memory="${RAM_GIB}GiB")
+  INIT_ARGS=(init --empty --project "${PROJECT_NAME}" --profile "${PROFILE_NAME}" "${INSTANCE_NAME}" -c limits.cpu="${CPU_CORES}" -c limits.memory="${RAM_LIMIT}")
 else
-  INIT_ARGS=(init --project "${PROJECT_NAME}" --profile "${PROFILE_NAME}" "${SELECTED_FP_FULL}" "${INSTANCE_NAME}" -c limits.cpu="${CPU_CORES}" -c limits.memory="${RAM_GIB}GiB")
+  INIT_ARGS=(init --project "${PROJECT_NAME}" --profile "${PROFILE_NAME}" "${SELECTED_FP_FULL}" "${INSTANCE_NAME}" -c limits.cpu="${CPU_CORES}" -c limits.memory="${RAM_LIMIT}")
 fi
 if [[ "${SELECTED_TYPE}" == 'virtual-machine' ]]; then
   INIT_ARGS+=(--vm)
@@ -620,7 +636,7 @@ echo "Type        : ${INSTANCE_TYPE}"
 echo "Subnet      : ${NETWORK_IPV4_CIDR}"
 echo "Project ID  : ${PROJECT_ID}"
 echo "CPU         : ${CPU_CORES}"
-echo "RAM         : ${RAM_GIB}GiB"
+echo "RAM         : ${RAM_LIMIT}"
 echo "Boot disk   : ${DISK_GIB}GiB"
 echo "Instance IP : ${INSTANCE_IPV4}"
 ipv6_enabled && echo "IPv6        : ${INSTANCE_IPV6:-none yet}$([[ -n "${INSTANCE_IPV6}" ]] && { ipv6_routed && echo ' (global, routed)' || echo ' (NAT66)'; })"
