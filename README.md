@@ -684,6 +684,17 @@ The restored instance is imported stopped. If the backup had a public IP, the ne
 
 ---
 
+## Ops runner (web UI actions)
+
+The custom web UI (Backups, Snapshots, create/delete project and instance) runs these scripts through an **ops runner**: an instance whose config has `user.infnet-ops=runner`. The UI finds it by that key and uses the Incus exec API to run `ops/ops-job.sh`; job logs (`/var/lib/infnet-ops/jobs/<id>/log` and `status.json`) are read back through the file API.
+
+The runner is a privileged container (so it writes to the NFS share as root, like the members) with:
+- the backup share passed in as a disk device (`/mnt/incus-backups`);
+- the Incus client with a trusted client certificate (`incus remote add cluster <token>`; the runner's NAT address must be allowed to reach the members' API port, and the Zabbix server's web port for registrations);
+- this repository at `/opt/infnet-incus-scripts` with the hosts' `.env` (secrets; mode 600). Refresh both after script changes by copying them over from a member.
+
+`ops/ops-job.sh` accepts a fixed list of actions with validated JSON arguments: `backup`, `restore`, `create-project`, `delete-project`, `create-instance`, `delete-instance`, plus `list-backups` and `list-jobs`. Deleting backs up first unless told not to. A restore replaces the instance in place after a `pre-restore` safety backup, or (`new_name`) restores a copy with `--no-public-ip`. `create-instance.sh --ram-mib` and `restore-instance.sh --no-public-ip` exist for these flows.
+
 ## Zabbix monitoring
 
 Zabbix monitors the **instances**, both containers and VMs (not the Incus hosts). Instances are registered automatically, the same way as DNS.
