@@ -17,7 +17,7 @@ fail() {
 
 usage() {
   cat <<'EOF'
-Usage: restore-instance.sh --project-id ID --instance-name NAME [--backup-index N | --backup-file PATH] [--new-name NAME] [--yes]
+Usage: restore-instance.sh --project-id ID --instance-name NAME [--backup-index N | --backup-file PATH] [--new-name NAME] [--no-public-ip] [--yes]
 
 Restores an instance from a backup written by backup-instances.sh. The
 restored instance is created in the same project it was backed up from,
@@ -38,6 +38,10 @@ Options:
   --backup-index N      Numeric backup list index (1-based, newest first) to restore.
   --backup-file PATH    Exact backup tarball to restore, instead of browsing.
   --new-name NAME        Name for the restored instance (default: original name).
+  --no-public-ip         Restore without the 1:1 NAT public IP: the copy gets a fresh
+                         internal address, its own default firewall ACL and a description
+                         without the public IP, and the original keeps the public IP.
+                         For a restore under a new name while the original still exists.
   --yes                  Skip the confirmation prompt.
   --help                 Show this help message.
 
@@ -71,6 +75,7 @@ INSTANCE_NAME_ARG=''
 BACKUP_INDEX_ARG=''
 BACKUP_FILE_ARG=''
 NEW_NAME_ARG=''
+NO_PUBLIC_IP=''
 CONFIRM_ARG=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -98,6 +103,10 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || fail 'missing value for --new-name.'
       NEW_NAME_ARG="$2"
       shift 2
+      ;;
+    --no-public-ip)
+      NO_PUBLIC_IP='yes'
+      shift
       ;;
     --yes)
       CONFIRM_ARG='yes'
@@ -250,7 +259,9 @@ if [[ -n "${NAT_INFO}" ]]; then
     || fail "network '${NAT_NETWORK}' from the backup does not exist in project '${PROJECT_NAME}'."
   if incus network forward show "${NAT_NETWORK}" "${NAT_PUBLIC}" --project "${PROJECT_NAME}" >/dev/null 2>&1; then
     NAT_OWNER="$(nat_find_owner "${PROJECT_NAME}" "${NAT_PUBLIC}")"
-    [[ -z "${NAT_OWNER}" ]] || fail "public IP ${NAT_PUBLIC} still belongs to '${NAT_OWNER}'. Delete that instance first; a restored copy would share its 1:1 NAT identity."
+    if [[ -n "${NAT_OWNER}" && -z "${NO_PUBLIC_IP}" ]]; then
+      fail "public IP ${NAT_PUBLIC} still belongs to '${NAT_OWNER}'. Delete that instance first; a restored copy would share its 1:1 NAT identity (or restore with --no-public-ip)."
+    fi
   else
     nat_validate_address "$(nat_network_uplink "${NAT_NETWORK}" "${PROJECT_NAME}")" "${NAT_PUBLIC}" || exit 1
     NAT_FORWARD_CREATED='pending'
@@ -262,7 +273,9 @@ echo 'Ready to restore:'
 echo "Project           : ${PROJECT_NAME}"
 echo "Backup file        : ${BACKUP_FILE}"
 echo "Restored as        : ${TARGET_NAME}"
-if [[ -n "${NAT_PUBLIC}" ]]; then
+if [[ -n "${NAT_PUBLIC}" && -n "${NO_PUBLIC_IP}" ]]; then
+  echo "Public IP          : none (the backup's ${NAT_PUBLIC} stays with the original); new internal address"
+elif [[ -n "${NAT_PUBLIC}" ]]; then
   echo "Public IP          : ${NAT_PUBLIC} -> ${NAT_INTERNAL} (1:1 NAT on '${NAT_NETWORK}')"
 fi
 for ACL_ENTRY in "${ACLS_TO_CREATE[@]}"; do
@@ -284,6 +297,8 @@ if [[ -n "${NAT_PUBLIC}" ]]; then
     run incus network forward create "${NAT_NETWORK}" "${NAT_PUBLIC}" target_address="${NAT_INTERNAL}" \
       --description "${TARGET_NAME}" --project "${PROJECT_NAME}" </dev/null
     NAT_FORWARD_CREATED='yes'
+  elif [[ -n "${NO_PUBLIC_IP}" ]]; then
+    echo "Network forward ${NAT_PUBLIC} stays with the original instance."
   else
     echo "Reusing existing network forward ${NAT_PUBLIC}, pointing it at ${NAT_INTERNAL}..."
     run incus network forward set "${NAT_NETWORK}" "${NAT_PUBLIC}" target_address="${NAT_INTERNAL}" --project "${PROJECT_NAME}"
@@ -308,7 +323,45 @@ if ! incus import "${BACKUP_FILE}" "${TARGET_NAME}" --project "${PROJECT_NAME}";
   done
   fail "command failed: incus import ${BACKUP_FILE} ${TARGET_NAME} --project ${PROJECT_NAME}"
 fi
-[[ -z "${NAT_PUBLIC}" ]] || run incus config set "${TARGET_NAME}" "${PUBLIC_IP_CONFIG_KEY}=${NAT_PUBLIC}" --project "${PROJECT_NAME}"
+if [[ -n "${NAT_PUBLIC}" && -n "${NO_PUBLIC_IP}" ]]; then
+  # The import needed the forward to exist; now take the public IP and the pinned
+  # internal address off the copy so it neither shares the original's NAT nor its address.
+  NIC_NAME="$(incus config show "${TARGET_NAME}" --project "${PROJECT_NAME}" | python3 -c '
+import sys, yaml
+data = yaml.safe_load(sys.stdin) or {}
+for name, dev in (data.get("devices") or {}).items():
+    if dev.get("type") == "nic" and dev.get("ipv4.address.external"):
+        print(name)
+        break
+')"
+  [[ -n "${NIC_NAME}" ]] || fail "restored '${TARGET_NAME}', but could not find its NIC to remove the public IP; fix it by hand."
+  # A copy must not keep the original's MAC address: Incus rejects the NIC update while it
+  # is shared, and a duplicate MAC on the network would clash anyway.
+  incus config unset "${TARGET_NAME}" "volatile.${NIC_NAME}.hwaddr" --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
+  incus config device unset "${TARGET_NAME}" "${NIC_NAME}" hwaddr --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
+  # Both keys in one update: the pinned address is already in use by the original's NIC.
+  run incus config device set "${TARGET_NAME}" "${NIC_NAME}" ipv4.address= ipv4.address.external= --project "${PROJECT_NAME}"
+  incus config device unset "${TARGET_NAME}" "${NIC_NAME}" ipv4.address.external --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
+  incus config device unset "${TARGET_NAME}" "${NIC_NAME}" ipv4.address --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
+  incus config unset "${TARGET_NAME}" "${PUBLIC_IP_CONFIG_KEY}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
+  # Its own default firewall ACL, named after the copy.
+  FW_FAMILY="linux"
+  incus config show "${TARGET_NAME}" --project "${PROJECT_NAME}" | grep -qi 'image.os:.*windows' && FW_FAMILY="win"
+  if ! incus network acl show "${TARGET_NAME}" --project "${PROJECT_NAME}" >/dev/null 2>&1; then
+    fw_create_acl "${TARGET_NAME}" "${PROJECT_NAME}" "${FW_FAMILY}" || fail "unable to create firewall ACL '${TARGET_NAME}'."
+  fi
+  run incus config device set "${TARGET_NAME}" "${NIC_NAME}" security.acls="${TARGET_NAME}" --project "${PROJECT_NAME}"
+  # The description starts with the public IP: drop it.
+  OLD_DESC="$(incus config get "${TARGET_NAME}" description --property --project "${PROJECT_NAME}" 2>/dev/null || true)"
+  NEW_DESC="$(sed -E 's/^[[:space:]]*([0-9]{1,3}\.){3}[0-9]{1,3}[[:space:]]*//' <<< "${OLD_DESC}")"
+  [[ "${NEW_DESC}" == "${OLD_DESC}" ]] || run incus config set "${TARGET_NAME}" description="${NEW_DESC}" --property --project "${PROJECT_NAME}"
+  # The forward was only needed for the import: remove it if this run created it.
+  if [[ "${NAT_FORWARD_CREATED}" == 'yes' ]]; then
+    incus network forward delete "${NAT_NETWORK}" "${NAT_PUBLIC}" --project "${PROJECT_NAME}" >/dev/null 2>&1 || true
+  fi
+elif [[ -n "${NAT_PUBLIC}" ]]; then
+  run incus config set "${TARGET_NAME}" "${PUBLIC_IP_CONFIG_KEY}=${NAT_PUBLIC}" --project "${PROJECT_NAME}"
+fi
 
 echo
 echo 'Restore complete.'
@@ -317,7 +370,9 @@ echo "Instance : ${TARGET_NAME}"
 echo
 echo "The instance was imported stopped. Start it with:"
 echo "  incus start ${TARGET_NAME} --project ${PROJECT_NAME}"
-if [[ -n "${NAT_PUBLIC}" ]]; then
+if [[ -n "${NAT_PUBLIC}" && -n "${NO_PUBLIC_IP}" ]]; then
+  echo "It has no public IP and a new internal address (assigned when it starts). Run dns/sync-dns-records.sh and monitoring/sync-zabbix-hosts.sh to register it."
+elif [[ -n "${NAT_PUBLIC}" ]]; then
   echo "Its 1:1 NAT (${NAT_PUBLIC}) is in place. DNS records and Zabbix were not touched; run dns/sync-dns-records.sh and monitoring/sync-zabbix-hosts.sh if needed."
 fi
 if (( ${#ACLS_CREATED[@]} > 0 )); then

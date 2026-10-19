@@ -119,7 +119,7 @@ run_restore() {
     [[ -n "${new_name}" ]] || { echo "Error: a new name is required when not restoring in place."; return 2; }
     echo "== Restoring ${instance} from ${file} as ${new_name} =="
     "${ROOT_DIR}/backup/restore-instance.sh" --project-id "${pid}" --instance-name "${instance}" --backup-file "${file}" \
-      --new-name "${new_name}" --yes
+      --new-name "${new_name}" --no-public-ip --yes
   fi
 }
 
