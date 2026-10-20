@@ -12,7 +12,9 @@
 #   create-project   {"name","project_id","ipv6"}
 #   delete-project   {"project","backup_first","requested_by"}
 #   create-instance  {"project","environment","service_code","profile_type","cpu","ram_mib","disk",
-#                     "image_alias","empty","public_ip","target","description_suffix"}
+#                     "image_alias","empty","public_ip","target","description_suffix",
+#                     "firewall_rules":[{"proto","ports","source","description"}]}
+#                     The rules are added with firewall-manager.sh once the instance exists.
 #   delete-instance  {"project","instance" | "items":[{"project","instance"}],"backup_first","requested_by"}
 #
 # Jobs live in ${OPS_JOBS_DIR:-/var/lib/infnet-ops/jobs}/JOBID/{log,status.json}.
@@ -188,6 +190,23 @@ run_create_instance() {
   [[ "${disk}" =~ ^[0-9]+$ ]] && (( disk >= 1 && disk <= 16384 )) || { echo "Error: invalid disk size."; return 2; }
   [[ -z "${target}" ]] || valid_name "${target}" || { echo "Error: invalid zone."; return 2; }
   valid_text "${suffix}" || { echo "Error: invalid description."; return 2; }
+  local fw_specs=() fw_sources=() fw_descs=() rule proto ports source rdesc
+  while IFS= read -r rule; do
+    [[ -n "${rule}" ]] || continue
+    proto="$(jq -r '.proto // empty' <<< "${rule}")"
+    ports="$(jq -r '.ports // empty' <<< "${rule}")"
+    source="$(jq -r '.source // empty' <<< "${rule}")"
+    rdesc="$(jq -r '.description // empty' <<< "${rule}")"
+    case "${proto}" in
+      tcp|udp|both) [[ "${ports}" =~ ^[0-9]{1,5}([,-][0-9]{1,5})*$ ]] || { echo "Error: invalid firewall ports '${ports}'."; return 2; }
+        fw_specs+=("${proto}:${ports}") ;;
+      icmp4|icmp6) fw_specs+=("${proto}") ;;
+      *) echo "Error: invalid firewall protocol '${proto}'."; return 2 ;;
+    esac
+    [[ -z "${source}" || "${source}" == infnet || "${source}" =~ ^[0-9A-Fa-f:./,]+$ ]] || { echo "Error: invalid firewall source '${source}'."; return 2; }
+    valid_text "${rdesc}" || { echo "Error: invalid firewall description."; return 2; }
+    fw_sources+=("${source}"); fw_descs+=("${rdesc}")
+  done < <(jq -c '.firewall_rules // [] | .[]' <<< "${JOB_PARAMS}")
   pid="$(project_id_of "${project}")"
   [[ -n "${pid}" ]] || { echo "Error: '${project}' is not a project managed by these scripts (no Project ID)."; return 2; }
   local args=(--project-id "${pid}" --environment "${env}" --service-code "${code}" --profile-type "${ptype}"
@@ -205,7 +224,24 @@ run_create_instance() {
   esac
   [[ -z "${target}" ]] || args+=(--target "${target}")
   [[ -z "${suffix}" ]] || args+=(--description-suffix "${suffix}")
-  "${ROOT_DIR}/create-instance.sh" "${args[@]}" </dev/null
+  local out rc=0 name i fwargs
+  out="$(mktemp)"
+  "${ROOT_DIR}/create-instance.sh" "${args[@]}" </dev/null 2>&1 | tee "${out}"
+  rc="${PIPESTATUS[0]}"
+  name="$(sed -n 's/^Name  *: *//p' "${out}" | head -1)"
+  rm -f "${out}"
+  (( rc == 0 )) || return "${rc}"
+  if (( ${#fw_specs[@]} > 0 )); then
+    [[ -n "${name}" ]] || { echo "Error: could not tell the new instance's name; firewall rules were not added."; return 1; }
+    echo "== Opening ${#fw_specs[@]} firewall rule(s) on ${name} =="
+    for i in "${!fw_specs[@]}"; do
+      fwargs=(--project-id "${pid}" --instance "${name}" --add "${fw_specs[$i]}")
+      [[ -z "${fw_sources[$i]}" ]] || fwargs+=(--source "${fw_sources[$i]}")
+      [[ -z "${fw_descs[$i]}" ]] || fwargs+=(--description "${fw_descs[$i]}")
+      "${ROOT_DIR}/firewall-manager.sh" "${fwargs[@]}" </dev/null || rc=1
+    done
+  fi
+  return "${rc}"
 }
 
 delete_one_instance() {
