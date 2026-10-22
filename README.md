@@ -916,7 +916,7 @@ With the defaults, a backup's total lifespan looks like:
 
 Bucket boundaries are rolling day-counts from the moment each run starts, not calendar weeks/months, and are computed per instance.
 
-Containers are exported with `--optimized-storage` (a ZFS stream); VMs use a plain export, because LXD's optimized export miscounted VM snapshots and Incus shares that storage code. Backups are taken without stopping the instance - treat them as crash-consistent, not necessarily transaction-consistent for databases.
+Containers are exported with `--optimized-storage` (a ZFS stream); VMs use a plain export, because LXD's optimized export miscounted VM snapshots and Incus shares that storage code. Exports use `--instance-only`, so snapshots are not included. Backups are taken without stopping the instance - treat them as crash-consistent, not necessarily transaction-consistent for databases.
 
 ### Optional `.env` settings
 

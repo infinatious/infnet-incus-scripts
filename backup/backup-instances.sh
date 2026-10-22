@@ -411,7 +411,10 @@ for PROJECT_NAME in "${PROJECT_NAMES[@]}"; do
       # Incus shares that storage code, so VMs keep the plain export until
       # the optimized path is proven on Incus. Containers only have one
       # dataset and aren't affected.
-      EXPORT_OPTS=(--project "${PROJECT_NAME}" --compression gzip)
+      # --instance-only leaves out snapshots: the short-lived rollback snapshots
+      # would otherwise be exported as extra full disk images (4x the size for
+      # a VM with three snapshots).
+      EXPORT_OPTS=(--project "${PROJECT_NAME}" --compression gzip --instance-only)
       [[ "${INSTANCE_TYPE}" == 'virtual-machine' ]] || EXPORT_OPTS+=(--optimized-storage)
       if incus export "${INSTANCE_NAME}" "${CURRENT_PARTIAL}" "${EXPORT_OPTS[@]}" 2> "${WORK_DIR}/export.err" \
          && mv -f -- "${CURRENT_PARTIAL}" "${BACKUP_FILE}"; then
