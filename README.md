@@ -693,6 +693,14 @@ The runner is a privileged container (so it writes to the NFS share as root, lik
 - the Incus client with a trusted client certificate (`incus remote add cluster <token>`; the runner's NAT address must be allowed to reach the members' API port, and the Zabbix server's web port for registrations);
 - this repository at `/opt/infnet-incus-scripts` with the hosts' `.env` (secrets; mode 600). Refresh both after script changes by copying them over from a member.
 
+### Ops gateway (`ops/gateway/ops-gateway.py`)
+Delegated users (project operators) must not get `exec` on the runner, which holds an admin certificate. The UI therefore talks to a small HTTP service on the runner instead (systemd `infnet-ops-gateway`, port 8091, config `/etc/infnet-ops-gateway.env`, root-only):
+
+- The browser calls `/ops/api/...` on the Incus UI's own origin, so its OIDC cookies come along. The gateway forwards them to `GET /1.0` on the Incus API, which validates the token and reports the user's e-mail.
+- Permissions come from the Incus OpenFGA store (`user:<email>`). Administrators (`can_edit` on `server:incus`) may do everything. Everyone else may list and read jobs/backups of projects they can view, and start `backup`, `restore`, `create-instance` and `delete-instance` in projects where they have `can_create_instances` (operator). A restore must use a backup of the same project and instance. `create-project` and `delete-project` are admin-only. `requested_by` is always the caller's e-mail.
+- Run the tests with `python3 -I ops/gateway/test_ops_gateway.py`.
+- Routing: a Cloudflare tunnel public hostname rule for `us-west.infinatio.us`, path `^/ops/api`, service `http://<runner forward address>:8091` (ahead of the catch-all). The UI falls back to exec on the runner (administrators only) when `/ops/api/me` does not answer.
+
 `ops/ops-job.sh` accepts a fixed list of actions with validated JSON arguments: `backup`, `restore`, `create-project`, `delete-project`, `create-instance`, `delete-instance`, plus `list-backups` and `list-jobs`. Deleting backs up first unless told not to. A restore replaces the instance in place after a `pre-restore` safety backup, or (`new_name`) restores a copy with `--no-public-ip`. `create-instance.sh --ram-mib` and `restore-instance.sh --no-public-ip` exist for these flows.
 
 ## Zabbix monitoring
