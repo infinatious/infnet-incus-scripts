@@ -90,11 +90,13 @@ mapfile -t PROJECT_OPTIONS < <(
 )
 (( ${#PROJECT_OPTIONS[@]} > 0 )) || fail 'no projects with project ID metadata were found.'
 
-echo 'Available projects:'
-for PROJECT_ENTRY in "${PROJECT_OPTIONS[@]}"; do
-  IFS=$'\t' read -r PROJECT_ID PROJECT_NAME <<< "${PROJECT_ENTRY}"
-  printf '%2s) %s\n' "${PROJECT_ID}" "${PROJECT_NAME}"
-done
+if [[ -z "${PROJECT_ID_ARG}" && -t 0 ]]; then
+  echo 'Available projects:'
+  for PROJECT_ENTRY in "${PROJECT_OPTIONS[@]}"; do
+    IFS=$'\t' read -r PROJECT_ID PROJECT_NAME <<< "${PROJECT_ENTRY}"
+    printf '%2s) %s\n' "${PROJECT_ID}" "${PROJECT_NAME}"
+  done
+fi
 if [[ -n "${PROJECT_ID_ARG}" ]]; then
   SELECTED_PROJECT_ID="${PROJECT_ID_ARG}"
 else

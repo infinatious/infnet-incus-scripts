@@ -196,11 +196,13 @@ mapfile -t PROJECT_OPTIONS < <(
 )
 (( ${#PROJECT_OPTIONS[@]} > 0 )) || fail 'no projects with project ID metadata were found.'
 
-echo 'Available projects:'
-for PROJECT_ENTRY in "${PROJECT_OPTIONS[@]}"; do
-  IFS=$'\t' read -r PROJECT_ID PROJECT_NAME <<< "${PROJECT_ENTRY}"
-  printf '%2s) %s\n' "${PROJECT_ID}" "${PROJECT_NAME}"
-done
+if [[ -z "${PROJECT_ID_ARG}" && -t 0 ]]; then
+  echo 'Available projects:'
+  for PROJECT_ENTRY in "${PROJECT_OPTIONS[@]}"; do
+    IFS=$'\t' read -r PROJECT_ID PROJECT_NAME <<< "${PROJECT_ENTRY}"
+    printf '%2s) %s\n' "${PROJECT_ID}" "${PROJECT_NAME}"
+  done
+fi
 if [[ -n "${PROJECT_ID_ARG}" ]]; then
   SELECTED_PROJECT_ID="${PROJECT_ID_ARG}"
 else
@@ -451,6 +453,18 @@ esac
 
 NAME_PREFIX="${ENV_PREFIX}${PROJECT_ID_STR}-${SERVICE_CODE}-${INSTANCE_TYPE}"
 mapfile -t EXISTING_MATCHES < <(incus list --project "${PROJECT_NAME}" --format csv -c n 2>/dev/null | grep -E "^${NAME_PREFIX}[0-9]{2}$" || true)
+# The other site may already hold this name (project IDs can overlap between
+# sites and public names are unique across both), so its numbers, seen as
+# records in the shared DNS zone, count too. Unions only ever skip a number.
+if declare -F dns_list_instance_labels >/dev/null && technitium_configured; then
+  if DNS_MATCHES="$(dns_list_instance_labels "^${NAME_PREFIX}[0-9]{2}$")"; then
+    while IFS= read -r label; do
+      [[ -n "${label}" ]] && EXISTING_MATCHES+=("${label}")
+    done <<< "${DNS_MATCHES}"
+  else
+    echo "Warning: unable to list Technitium names; numbering ${NAME_PREFIX}NN from this site only." >&2
+  fi
+fi
 NEXT_SEQ=1
 if (( ${#EXISTING_MATCHES[@]} > 0 )); then
   LAST_SEQ="$(printf '%s\n' "${EXISTING_MATCHES[@]}" | sed -E 's/.*([0-9]{2})$/\1/' | sort -n | tail -n1)"

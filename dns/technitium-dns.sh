@@ -119,6 +119,23 @@ dns_lookup_record_ips() {
   jq -r --arg want "${want}" '.response.records[]? | select(.type == "A" or .type == "AAAA") | select($want == "any" or .type == $want) | .rData.ipAddress // empty' <<< "${response}" 2>/dev/null
 }
 
+# First labels of every A/AAAA name in the zone that match an extended regex,
+# one per line (a name is "<label>.<zone>" or "<label>.<project>.<zone>"). Both
+# sites write to the one zone, so this sees instances of the other site too.
+# Returns 1 when Technitium is unconfigured or unreachable.
+dns_list_instance_labels() {
+  local regex="$1" response
+  technitium_configured || return 1
+  response="$(curl -sS --connect-timeout 5 --max-time 60 -G "${TECHNITIUM_URL%/}/api/zones/records/get" \
+    --data-urlencode "token=${TECHNITIUM_API_TOKEN}" \
+    --data-urlencode "domain=${TECHNITIUM_ZONE}" \
+    --data-urlencode "zone=${TECHNITIUM_ZONE}" \
+    --data-urlencode "listZone=true" 2>&1)" || return 1
+  [[ "$(jq -r '.status // empty' <<< "${response}" 2>/dev/null)" == 'ok' ]] || return 1
+  jq -r '.response.records[]? | select(.type == "A" or .type == "AAAA") | .name | split(".")[0]' <<< "${response}" 2>/dev/null \
+    | grep -E "${regex}" | sort -u || true
+}
+
 dns_lookup_record_ip() {
   local fqdn="$1" response ip
 
